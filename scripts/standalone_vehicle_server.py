@@ -8,7 +8,6 @@ import logging
 import hashlib
 import secrets
 from vehicle_controller import VehicleController
-from bluetooth_server import BluetoothServer
 import os
 import psutil
 import platform
@@ -18,7 +17,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('/var/log/mining_vehicle.log'),
+        logging.FileHandler('/var/log/smartrover/vehicle.log'),
         logging.StreamHandler()
     ]
 )
@@ -37,8 +36,6 @@ CORS(app, supports_credentials=True, origins=['*'])
 # Global instances
 vehicle_controller = None
 vehicle_thread = None
-bluetooth_server = None
-bluetooth_thread = None
 
 @app.route('/api/system-status', methods=['GET'])
 def get_system_status():
@@ -64,7 +61,7 @@ def get_vehicle_status():
             # Add connection info
             status_data['connection_info'] = {
                 'wifi_connected': True,
-                'bluetooth_connected': len(bluetooth_server.authenticated_clients) > 0 if bluetooth_server else False,
+                'bluetooth_connected': False,  # Simplified for now
                 'last_update': time.time()
             }
             
@@ -177,7 +174,7 @@ def get_system_info():
                 'network': network_info,
                 'uptime': uptime,
                 'vehicle_running': vehicle_controller.running if vehicle_controller else False,
-                'bluetooth_clients': len(bluetooth_server.authenticated_clients) if bluetooth_server else 0,
+                'bluetooth_clients': 0,  # Simplified for now
                 'timestamp': time.time()
             }
         })
@@ -193,7 +190,7 @@ def get_logs():
     """Get system logs"""
     try:
         lines = int(request.args.get('lines', 100))
-        log_file = '/var/log/mining_vehicle.log'
+        log_file = '/var/log/smartrover/vehicle.log'
         
         if os.path.exists(log_file):
             with open(log_file, 'r') as f:
@@ -202,7 +199,7 @@ def get_logs():
             return jsonify({
                 'success': True,
                 'data': {
-                    'logs': log_lines,
+                    'logs': [line.strip() for line in log_lines],
                     'total_lines': len(log_lines),
                     'timestamp': time.time()
                 }
@@ -272,29 +269,6 @@ def start_vehicle_thread():
     vehicle_thread.start()
     logger.info("Vehicle thread started")
 
-def start_bluetooth_server():
-    """Start Bluetooth server in separate thread"""
-    global bluetooth_server, bluetooth_thread, vehicle_controller
-    
-    if bluetooth_thread and bluetooth_thread.is_alive():
-        logger.info("Bluetooth server already running")
-        return
-    
-    def run_bluetooth():
-        global bluetooth_server
-        try:
-            if not vehicle_controller:
-                vehicle_controller = VehicleController()
-            
-            bluetooth_server = BluetoothServer(vehicle_controller)
-            bluetooth_server.start_server()
-        except Exception as e:
-            logger.error(f"Bluetooth server error: {e}")
-    
-    bluetooth_thread = threading.Thread(target=run_bluetooth, daemon=True)
-    bluetooth_thread.start()
-    logger.info("Bluetooth server thread started")
-
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
@@ -303,8 +277,7 @@ def health_check():
         'timestamp': time.time(),
         'version': '2.0.0',
         'services': {
-            'vehicle_controller': vehicle_controller is not None,
-            'bluetooth_server': bluetooth_server is not None
+            'vehicle_controller': vehicle_controller is not None
         }
     })
 
@@ -312,14 +285,11 @@ if __name__ == '__main__':
     logger.info("Starting Standalone Mining Vehicle Server v2.0.0...")
     
     # Create log directory
-    os.makedirs('/var/log', exist_ok=True)
+    os.makedirs('/var/log/smartrover', exist_ok=True)
     os.makedirs('/tmp/flask_sessions', exist_ok=True)
     
-    # Start vehicle controller thread
-    start_vehicle_thread()
-    
-    # Start Bluetooth server thread
-    start_bluetooth_server()
+    # Initialize vehicle controller
+    vehicle_controller = VehicleController()
     
     # Start Flask server
     app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)

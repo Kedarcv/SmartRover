@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 SmartRover Mining Vehicle Production Setup Script
-This script configures the system for production deployment
+This script configures the system for production deployment with auto-start capabilities
 """
 
 import os
@@ -10,6 +10,8 @@ import subprocess
 import json
 import logging
 from pathlib import Path
+import sqlite3
+from datetime import datetime
 
 # Configure logging
 logging.basicConfig(
@@ -24,6 +26,7 @@ class ProductionSetup:
         self.base_dir = Path('/opt/smartrover')
         self.config_dir = Path('/etc/smartrover')
         self.log_dir = Path('/var/log/smartrover')
+        self.data_dir = Path('/var/lib/smartrover')
         self.services_dir = Path('/etc/systemd/system')
         self.user = 'smartrover'
         
@@ -40,12 +43,19 @@ class ProductionSetup:
         packages = [
             'python3-pip',
             'python3-venv',
+            'python3-dev',
+            'build-essential',
+            'cmake',
             'bluetooth',
             'bluez',
             'libbluetooth-dev',
             'nginx',
             'supervisor',
-            'logrotate'
+            'logrotate',
+            'sqlite3',
+            'curl',
+            'wget',
+            'git'
         ]
         
         try:
@@ -60,7 +70,7 @@ class ProductionSetup:
         """Setup Python virtual environment"""
         logger.info("Setting up Python environment...")
         
-        venv_path = self.project_root / 'venv'
+        venv_path = self.base_dir / 'venv'
         
         try:
             # Create virtual environment
@@ -68,10 +78,24 @@ class ProductionSetup:
             
             # Install Python dependencies
             pip_path = venv_path / 'bin' / 'pip'
-            requirements_path = self.project_root / 'requirements.txt'
             
             subprocess.run([str(pip_path), 'install', '--upgrade', 'pip'], check=True)
-            subprocess.run([str(pip_path), 'install', '-r', str(requirements_path)], check=True)
+            
+            # Install core packages
+            packages = [
+                'numpy==1.21.6',
+                'opencv-python==4.5.5.64',
+                'tensorflow==2.8.0',
+                'flask==2.2.2',
+                'flask-cors==3.0.10',
+                'gpiozero==1.6.2',
+                'RPi.GPIO==0.7.1',
+                'psutil==5.9.0',
+                'requests==2.28.1'
+            ]
+            
+            for package in packages:
+                subprocess.run([str(pip_path), 'install', package], check=True)
             
             logger.info("Python environment setup completed")
         except subprocess.CalledProcessError as e:
@@ -85,12 +109,12 @@ class ProductionSetup:
         try:
             subprocess.run([
                 'useradd', '--system', '--shell', '/bin/false',
-                '--home', '/var/lib/smartrover', '--create-home',
+                '--home', str(self.data_dir), '--create-home',
                 self.user
             ], check=True)
             
             # Add user to required groups
-            subprocess.run(['usermod', '-a', '-G', 'gpio,bluetooth', self.user], check=True)
+            subprocess.run(['usermod', '-a', '-G', 'gpio,bluetooth,video,i2c,spi', self.user], check=True)
             
             logger.info("System user created successfully")
         except subprocess.CalledProcessError:
@@ -104,14 +128,99 @@ class ProductionSetup:
             self.base_dir,
             self.config_dir,
             self.log_dir,
-            self.base_dir / 'models',
-            self.base_dir / 'data',
-            self.base_dir / 'backups'
+            self.data_dir,
+            self.data_dir / 'models',
+            self.data_dir / 'maps',
+            self.data_dir / 'backups',
+            Path('/var/run/smartrover')
         ]
         
         for directory in directories:
             directory.mkdir(parents=True, exist_ok=True)
+            subprocess.run(['chown', f'{self.user}:{self.user}', str(directory)], check=True)
+            subprocess.run(['chmod', '755', str(directory)], check=True)
             logger.info(f"Created directory: {directory}")
+    
+    def initialize_database(self):
+        """Initialize the mining database with default data"""
+        logger.info("Initializing mining database...")
+        
+        db_path = self.data_dir / 'mining_data.db'
+        
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.cursor()
+        
+        # Create tables
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS waypoints (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                x REAL NOT NULL,
+                y REAL NOT NULL,
+                type TEXT DEFAULT 'mining',
+                status TEXT DEFAULT 'pending',
+                priority INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                completed_at TIMESTAMP NULL
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS mining_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                end_time TIMESTAMP NULL,
+                waypoints_completed INTEGER DEFAULT 0,
+                total_distance REAL DEFAULT 0,
+                minerals_collected INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'active'
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS system_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                level TEXT NOT NULL,
+                message TEXT NOT NULL,
+                component TEXT DEFAULT 'system'
+            )
+        ''')
+        
+        # Insert default docking station
+        cursor.execute('''
+            INSERT OR IGNORE INTO waypoints (id, name, x, y, type, status, priority)
+            VALUES (1, 'Docking Station', 1000, 1000, 'dock', 'completed', 0)
+        ''')
+        
+        # Insert sample mining waypoints
+        sample_waypoints = [
+            ('Mining Point Alpha', 800, 800, 'mining', 'pending', 3),
+            ('Mining Point Beta', 1200, 800, 'mining', 'pending', 2),
+            ('Mining Point Gamma', 1000, 600, 'mining', 'pending', 1),
+            ('Mining Point Delta', 600, 1000, 'mining', 'pending', 1),
+        ]
+        
+        for waypoint in sample_waypoints:
+            cursor.execute('''
+                INSERT OR IGNORE INTO waypoints (name, x, y, type, status, priority)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', waypoint)
+        
+        # Log initial setup
+        cursor.execute('''
+            INSERT INTO system_logs (level, message, component)
+            VALUES ('INFO', 'Database initialized with default waypoints', 'setup')
+        ''')
+        
+        conn.commit()
+        conn.close()
+        
+        # Set ownership
+        subprocess.run(['chown', f'{self.user}:{self.user}', str(db_path)], check=True)
+        subprocess.run(['chmod', '644', str(db_path)], check=True)
+        
+        logger.info("Mining database initialized with sample waypoints")
     
     def create_config_files(self):
         """Create production configuration files"""
@@ -125,48 +234,54 @@ class ProductionSetup:
                 "type": "autonomous_mining_rover",
                 "version": "2.0.0"
             },
-            "sensors": {
-                "ultrasonic": {
-                    "enabled": True,
-                    "pins": [18, 24, 23, 25],
-                    "max_distance": 400
+            "hardware": {
+                "motor_pins": {
+                    "IN1": 18,
+                    "IN2": 16,
+                    "IN3": 21,
+                    "IN4": 23,
+                    "ENA": 12,
+                    "ENB": 13
                 },
-                "camera": {
-                    "enabled": True,
-                    "device": "/dev/video0",
-                    "resolution": [640, 480],
-                    "fps": 30
+                "sensor_pins": {
+                    "TRIG": 24,
+                    "ECHO": 25
                 },
-                "imu": {
-                    "enabled": False,
-                    "device": "/dev/i2c-1"
+                "led_pins": {
+                    "status": 26,
+                    "warning": 13
+                },
+                "button_pins": {
+                    "emergency": 6
                 }
             },
-            "motors": {
-                "left": {
-                    "pin1": 16,
-                    "pin2": 20,
-                    "enable": 21
-                },
-                "right": {
-                    "pin1": 19,
-                    "pin2": 26,
-                    "enable": 13
-                }
+            "navigation": {
+                "max_speed": 0.8,
+                "obstacle_threshold": 30,
+                "waypoint_tolerance": 50,
+                "map_size": 2000,
+                "scale": 5
             },
-            "neural_network": {
-                "model_path": "/opt/smartrover/models/mining_vehicle_model.h5",
-                "input_shape": [64, 64, 3],
-                "confidence_threshold": 0.7
+            "mining": {
+                "collection_time": 3,
+                "auto_return_dock": True,
+                "max_session_time": 7200,
+                "auto_start_on_boot": True
             },
-            "slam": {
-                "enabled": True,
-                "map_size": [200, 200],
-                "resolution": 0.1,
-                "update_rate": 10
+            "server": {
+                "host": "0.0.0.0",
+                "port": 5000,
+                "debug": False,
+                "threaded": True
+            },
+            "logging": {
+                "level": "INFO",
+                "file": str(self.log_dir / "vehicle.log"),
+                "max_size": "10MB",
+                "backup_count": 5
             },
             "safety": {
-                "emergency_stop_pin": 3,
+                "emergency_stop_pin": 6,
                 "max_speed": 0.8,
                 "obstacle_threshold": 30,
                 "timeout": 5.0
@@ -176,192 +291,44 @@ class ProductionSetup:
         config_file = self.config_dir / 'vehicle_config.json'
         with open(config_file, 'w') as f:
             json.dump(vehicle_config, f, indent=2)
+        
+        subprocess.run(['chown', f'{self.user}:{self.user}', str(config_file)], check=True)
+        subprocess.run(['chmod', '644', str(config_file)], check=True)
+        
         logger.info(f"Created vehicle config: {config_file}")
-        
-        # Server configuration
-        server_config = {
-            "server": {
-                "host": "0.0.0.0",
-                "port": 5000,
-                "debug": False,
-                "threaded": True
-            },
-            "bluetooth": {
-                "enabled": True,
-                "service_name": "SmartRover Mining Control",
-                "service_uuid": "1e0ca4ea-299d-4335-93eb-27fcfe7fa848"
-            },
-            "logging": {
-                "level": "INFO",
-                "file": "/var/log/smartrover/vehicle.log",
-                "max_size": "10MB",
-                "backup_count": 5
-            },
-            "security": {
-                "session_timeout": 3600,
-                "max_login_attempts": 5,
-                "lockout_duration": 300
-            }
-        }
-        
-        server_config_file = self.config_dir / 'server_config.json'
-        with open(server_config_file, 'w') as f:
-            json.dump(server_config, f, indent=2)
-        logger.info(f"Created server config: {server_config_file}")
-    
-    def setup_gpio_permissions(self):
-        """Setup GPIO permissions for smartrover user"""
-        logger.info("Setting up GPIO permissions...")
-        
-        # Add smartrover user to gpio group
-        try:
-            subprocess.run(['usermod', '-a', '-G', 'gpio', self.user], check=True)
-            logger.info(f"Added {self.user} to gpio group")
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to add user to gpio group: {e}")
-    
-    def setup_bluetooth_permissions(self):
-        """Setup Bluetooth permissions"""
-        logger.info("Setting up Bluetooth permissions...")
-        
-        try:
-            # Add user to bluetooth group
-            subprocess.run(['usermod', '-a', '-G', 'bluetooth', self.user], check=True)
-            
-            # Configure Bluetooth service
-            bluetooth_override = Path('/etc/systemd/system/bluetooth.service.d')
-            bluetooth_override.mkdir(parents=True, exist_ok=True)
-            
-            override_content = """[Service]
-ExecStart=
-ExecStart=/usr/lib/bluetooth/bluetoothd --experimental
-"""
-            
-            with open(bluetooth_override / 'override.conf', 'w') as f:
-                f.write(override_content)
-            
-            logger.info("Configured Bluetooth service")
-            
-        except Exception as e:
-            logger.error(f"Failed to setup Bluetooth permissions: {e}")
-    
-    def create_backup_script(self):
-        """Create backup script for system data"""
-        logger.info("Creating backup script...")
-        
-        backup_script = """#!/bin/bash
-# SmartRover Backup Script
-
-BACKUP_DIR="/opt/smartrover/backups"
-DATE=$(date +%Y%m%d_%H%M%S)
-BACKUP_FILE="smartrover_backup_$DATE.tar.gz"
-
-echo "Creating backup: $BACKUP_FILE"
-
-# Create backup
-tar -czf "$BACKUP_DIR/$BACKUP_FILE" \
-    /opt/smartrover/models/ \
-    /opt/smartrover/data/ \
-    /etc/smartrover/ \
-    /var/log/smartrover/ \
-    --exclude="*.pyc" \
-    --exclude="__pycache__"
-
-# Keep only last 10 backups
-cd "$BACKUP_DIR"
-ls -t smartrover_backup_*.tar.gz | tail -n +11 | xargs -r rm
-
-echo "Backup completed: $BACKUP_FILE"
-"""
-        
-        backup_script_path = Path('/usr/local/bin/smartrover-backup')
-        with open(backup_script_path, 'w') as f:
-            f.write(backup_script)
-        
-        backup_script_path.chmod(0o755)
-        logger.info(f"Created backup script: {backup_script_path}")
-    
-    def setup_cron_jobs(self):
-        """Setup cron jobs for maintenance"""
-        logger.info("Setting up cron jobs...")
-        
-        cron_content = """# SmartRover Maintenance Cron Jobs
-# Daily backup at 2 AM
-0 2 * * * /usr/local/bin/smartrover-backup
-
-# Weekly log cleanup at 3 AM on Sunday
-0 3 * * 0 find /var/log/smartrover -name "*.log.*" -mtime +30 -delete
-
-# Daily system health check at 6 AM
-0 6 * * * /usr/local/bin/smartrover-status > /var/log/smartrover/health_check.log 2>&1
-"""
-        
-        cron_file = Path('/etc/cron.d/smartrover')
-        with open(cron_file, 'w') as f:
-            f.write(cron_content)
-        
-        cron_file.chmod(0o644)
-        logger.info(f"Created cron jobs: {cron_file}")
-    
-    def optimize_system(self):
-        """Optimize system for production"""
-        logger.info("Optimizing system for production...")
-        
-        # GPU memory split for Raspberry Pi
-        try:
-            subprocess.run(['raspi-config', 'nonint', 'do_memory_split', '128'], check=True)
-            logger.info("Set GPU memory split to 128MB")
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            logger.warning("Could not set GPU memory split (not on Raspberry Pi?)")
-        
-        # Enable I2C and SPI
-        try:
-            subprocess.run(['raspi-config', 'nonint', 'do_i2c', '0'], check=True)
-            subprocess.run(['raspi-config', 'nonint', 'do_spi', '0'], check=True)
-            logger.info("Enabled I2C and SPI interfaces")
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            logger.warning("Could not enable I2C/SPI (not on Raspberry Pi?)")
-    
-    def setup_directories(self):
-        """Setup required directories"""
-        logger.info("Setting up directories...")
-        
-        directories = [
-            self.config_dir,
-            self.log_dir,
-            Path('/var/lib/smartrover'),
-            Path('/var/run/smartrover')
-        ]
-        
-        for directory in directories:
-            directory.mkdir(parents=True, exist_ok=True)
-            subprocess.run(['chown', 'smartrover:smartrover', str(directory)], check=True)
-            subprocess.run(['chmod', '755', str(directory)], check=True)
-        
-        logger.info("Directories setup completed")
     
     def create_systemd_services(self):
-        """Create systemd service files"""
+        """Create systemd service files for auto-start"""
         logger.info("Creating systemd services...")
         
         # Main server service
         server_service = f"""[Unit]
 Description=SmartRover Mining Vehicle Server
+Documentation=https://github.com/smartrover/mining-vehicle
 After=network.target bluetooth.target
-Wants=network.target bluetooth.target
+Wants=network.target
 
 [Service]
 Type=simple
-User=smartrover
-Group=smartrover
-WorkingDirectory={self.project_root}
-Environment=PATH={self.project_root}/venv/bin
-ExecStart={self.project_root}/venv/bin/python scripts/enhanced_server.py
+User={self.user}
+Group={self.user}
+WorkingDirectory={self.base_dir}
+Environment=PATH={self.base_dir}/venv/bin
+Environment=PYTHONPATH={self.base_dir}
+ExecStart={self.base_dir}/venv/bin/python {self.base_dir}/enhanced_server.py
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=smartrover-server
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths={self.data_dir} {self.log_dir} /var/run/smartrover
 
 [Install]
 WantedBy=multi-user.target
@@ -370,21 +337,52 @@ WantedBy=multi-user.target
         # Vehicle controller service
         vehicle_service = f"""[Unit]
 Description=SmartRover Vehicle Controller
-After=network.target
+Documentation=https://github.com/smartrover/mining-vehicle
+After=network.target smartrover-server.service
 Wants=network.target
+Requires=smartrover-server.service
 
 [Service]
 Type=simple
-User=smartrover
-Group=smartrover
-WorkingDirectory={self.project_root}
-Environment=PATH={self.project_root}/venv/bin
-ExecStart={self.project_root}/venv/bin/python scripts/vehicle_controller.py
+User={self.user}
+Group={self.user}
+WorkingDirectory={self.base_dir}
+Environment=PATH={self.base_dir}/venv/bin
+Environment=PYTHONPATH={self.base_dir}
+ExecStart={self.base_dir}/venv/bin/python {self.base_dir}/vehicle_controller.py {self.data_dir}/mining_data.db
 Restart=always
-RestartSec=10
+RestartSec=15
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=smartrover-vehicle
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths={self.data_dir} {self.log_dir} /var/run/smartrover
+
+[Install]
+WantedBy=multi-user.target
+"""
+        
+        # Auto-start mining service (waits for system to be ready, then starts mining)
+        autostart_service = f"""[Unit]
+Description=SmartRover Auto-Start Mining Operations
+After=smartrover-server.service smartrover-vehicle.service
+Requires=smartrover-server.service smartrover-vehicle.service
+
+[Service]
+Type=oneshot
+User={self.user}
+Group={self.user}
+ExecStartPre=/bin/sleep 60
+ExecStart=/bin/bash -c 'curl -X POST http://localhost:5000/api/vehicle-control -H "Content-Type: application/json" -d "{{\\"command\\":\\"start_mining\\"}}" || true'
+RemainAfterExit=true
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=smartrover-autostart
 
 [Install]
 WantedBy=multi-user.target
@@ -397,25 +395,32 @@ WantedBy=multi-user.target
         with open(self.services_dir / 'smartrover-vehicle.service', 'w') as f:
             f.write(vehicle_service)
         
+        with open(self.services_dir / 'smartrover-autostart.service', 'w') as f:
+            f.write(autostart_service)
+        
         # Reload systemd and enable services
         subprocess.run(['systemctl', 'daemon-reload'], check=True)
         subprocess.run(['systemctl', 'enable', 'smartrover-server.service'], check=True)
         subprocess.run(['systemctl', 'enable', 'smartrover-vehicle.service'], check=True)
+        subprocess.run(['systemctl', 'enable', 'smartrover-autostart.service'], check=True)
         
-        logger.info("Systemd services created and enabled")
+        logger.info("Systemd services created and enabled for auto-start")
     
     def setup_nginx(self):
         """Setup Nginx reverse proxy"""
         logger.info("Setting up Nginx...")
         
         nginx_config = """server {
-    listen 80;
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    
     server_name _;
     
     # Security headers
     add_header X-Frame-Options DENY;
     add_header X-Content-Type-Options nosniff;
     add_header X-XSS-Protection "1; mode=block";
+    add_header Referrer-Policy "strict-origin-when-cross-origin";
     
     # API proxy
     location /api/ {
@@ -429,6 +434,11 @@ WantedBy=multi-user.target
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
+        
+        # Timeouts
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
     }
     
     # Health check
@@ -436,12 +446,23 @@ WantedBy=multi-user.target
         proxy_pass http://127.0.0.1:5000;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
+        access_log off;
     }
     
-    # Static files (if serving dashboard from Pi)
+    # Main application
     location / {
-        root /var/www/smartrover;
-        try_files $uri $uri/ /index.html;
+        proxy_pass http://127.0.0.1:5000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+    
+    # Deny access to sensitive files
+    location ~ /\\. {
+        deny all;
+        access_log off;
+        log_not_found off;
     }
 }
 """
@@ -468,142 +489,164 @@ WantedBy=multi-user.target
         
         logger.info("Nginx setup completed")
     
-    def setup_bluetooth(self):
-        """Setup Bluetooth configuration"""
-        logger.info("Setting up Bluetooth...")
+    def create_management_scripts(self):
+        """Create management scripts"""
+        logger.info("Creating management scripts...")
         
-        # Enable Bluetooth service
-        subprocess.run(['systemctl', 'enable', 'bluetooth'], check=True)
-        subprocess.run(['systemctl', 'start', 'bluetooth'], check=True)
-        
-        # Make device discoverable
-        bluetooth_config = """[General]
-Name = SmartRover-Mining-Vehicle
-Class = 0x000100
-DiscoverableTimeout = 0
-PairableTimeout = 0
-Discoverable = true
-Pairable = true
-
-[Policy]
-AutoEnable = true
+        # Status script
+        status_script = """#!/bin/bash
+echo "SmartRover Mining Vehicle Status"
+echo "================================"
+echo
+echo "Services:"
+systemctl is-active smartrover-server && echo "✓ Server: Running" || echo "✗ Server: Stopped"
+systemctl is-active smartrover-vehicle && echo "✓ Vehicle: Running" || echo "✗ Vehicle: Stopped"
+systemctl is-active nginx && echo "✓ Nginx: Running" || echo "✗ Nginx: Stopped"
+echo
+echo "System Info:"
+echo "IP Address: $(hostname -I | awk '{print $1}')"
+echo "Uptime: $(uptime -p)"
+if command -v vcgencmd >/dev/null 2>&1; then
+    echo "Temperature: $(vcgencmd measure_temp)"
+fi
+echo
+echo "Mining Status:"
+curl -s http://localhost:5000/api/vehicle-status | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    if data.get('success'):
+        status = data['data']['system_status']
+        print(f\"Mining Active: {status.get('mining_active', False)}\")
+        print(f\"Waypoints Completed: {status.get('waypoints_completed', 0)}\")
+        print(f\"Minerals Collected: {status.get('minerals_collected', 0)}\")
+        print(f\"Total Distance: {data['data']['map_data'].get('total_distance', 0):.1f}m\")
+    else:
+        print('Vehicle not responding')
+except:
+    print('Unable to get mining status')
+"
 """
         
-        with open('/etc/bluetooth/main.conf', 'w') as f:
-            f.write(bluetooth_config)
-        
-        subprocess.run(['systemctl', 'restart', 'bluetooth'], check=True)
-        
-        logger.info("Bluetooth setup completed")
-    
-    def setup_logrotate(self):
-        """Setup log rotation"""
-        logger.info("Setting up log rotation...")
-        
-        logrotate_config = """/var/log/smartrover/*.log {
-    daily
-    missingok
-    rotate 30
-    compress
-    delaycompress
-    notifempty
-    create 644 smartrover smartrover
-    postrotate
-        systemctl reload smartrover-server || true
-    endscript
-}
+        # Start mining script
+        start_mining_script = """#!/bin/bash
+echo "Starting SmartRover Mining Operation..."
+curl -X POST http://localhost:5000/api/vehicle-control \\
+     -H "Content-Type: application/json" \\
+     -d '{"command":"start_mining"}' \\
+     && echo "Mining operation started successfully" \\
+     || echo "Failed to start mining operation"
 """
         
-        with open('/etc/logrotate.d/smartrover', 'w') as f:
-            f.write(logrotate_config)
+        # Stop mining script
+        stop_mining_script = """#!/bin/bash
+echo "Stopping SmartRover Mining Operation..."
+curl -X POST http://localhost:5000/api/vehicle-control \\
+     -H "Content-Type: application/json" \\
+     -d '{"command":"stop_mining"}' \\
+     && echo "Mining operation stopped successfully" \\
+     || echo "Failed to stop mining operation"
+"""
         
-        logger.info("Log rotation setup completed")
+        # Return to dock script
+        return_dock_script = """#!/bin/bash
+echo "Returning SmartRover to Docking Station..."
+curl -X POST http://localhost:5000/api/vehicle-control \\
+     -H "Content-Type: application/json" \\
+     -d '{"command":"return_to_dock"}' \\
+     && echo "Return to dock initiated successfully" \\
+     || echo "Failed to initiate return to dock"
+"""
+        
+        scripts = {
+            '/usr/local/bin/smartrover-status': status_script,
+            '/usr/local/bin/smartrover-start-mining': start_mining_script,
+            '/usr/local/bin/smartrover-stop-mining': stop_mining_script,
+            '/usr/local/bin/smartrover-return-dock': return_dock_script
+        }
+        
+        for script_path, content in scripts.items():
+            with open(script_path, 'w') as f:
+                f.write(content)
+            subprocess.run(['chmod', '+x', script_path], check=True)
+        
+        logger.info("Management scripts created")
     
-    def create_startup_script(self):
-        """Create startup script"""
-        logger.info("Creating startup script...")
+    def setup_boot_optimization(self):
+        """Optimize system for faster boot and auto-start"""
+        logger.info("Optimizing system for auto-start...")
         
-        startup_script = f"""#!/bin/bash
-# SmartRover Mining Vehicle Startup Script
+        # Raspberry Pi specific optimizations
+        try:
+            # Set GPU memory split
+            subprocess.run(['raspi-config', 'nonint', 'do_memory_split', '128'], check=True)
+            
+            # Enable required interfaces
+            subprocess.run(['raspi-config', 'nonint', 'do_i2c', '0'], check=True)
+            subprocess.run(['raspi-config', 'nonint', 'do_spi', '0'], check=True)
+            subprocess.run(['raspi-config', 'nonint', 'do_camera', '0'], check=True)
+            
+            logger.info("Raspberry Pi optimizations applied")
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            logger.warning("Could not apply Raspberry Pi optimizations (not on Raspberry Pi?)")
+        
+        # Create boot script for immediate startup
+        boot_script = f"""#!/bin/bash
+# SmartRover Boot Script
+# This script runs early in the boot process
 
-set -e
+# Wait for network
+while ! ping -c 1 8.8.8.8 >/dev/null 2>&1; do
+    sleep 1
+done
 
-echo "Starting SmartRover Mining Vehicle System..."
-
-# Start services
+# Ensure services are running
 systemctl start smartrover-server
 systemctl start smartrover-vehicle
-systemctl start nginx
-systemctl start bluetooth
 
-# Wait for services to start
-sleep 5
-
-# Check service status
-echo "Service Status:"
-systemctl is-active smartrover-server && echo "✓ Server: Running" || echo "✗ Server: Failed"
-systemctl is-active smartrover-vehicle && echo "✓ Vehicle: Running" || echo "✗ Vehicle: Failed"
-systemctl is-active nginx && echo "✓ Nginx: Running" || echo "✗ Nginx: Failed"
-systemctl is-active bluetooth && echo "✓ Bluetooth: Running" || echo "✗ Bluetooth: Failed"
-
-echo ""
-echo "SmartRover Mining Vehicle System started successfully!"
-echo "Access the dashboard at: http://$(hostname -I | awk '{{print $1}}')"
-echo "Bluetooth device name: SmartRover-Mining-Vehicle"
-echo ""
-echo "Logs can be viewed with:"
-echo "  journalctl -u smartrover-server -f"
-echo "  journalctl -u smartrover-vehicle -f"
+# Log boot completion
+echo "$(date): SmartRover boot sequence completed" >> {self.log_dir}/boot.log
 """
         
-        startup_script_path = Path('/usr/local/bin/smartrover-start')
-        with open(startup_script_path, 'w') as f:
-            f.write(startup_script)
+        boot_script_path = Path('/usr/local/bin/smartrover-boot')
+        with open(boot_script_path, 'w') as f:
+            f.write(boot_script)
+        subprocess.run(['chmod', '+x', str(boot_script_path)], check=True)
         
-        subprocess.run(['chmod', '+x', str(startup_script_path)], check=True)
+        # Add to rc.local for early startup
+        rc_local_content = """#!/bin/bash
+# SmartRover early startup
+/usr/local/bin/smartrover-boot &
+
+exit 0
+"""
         
-        logger.info("Startup script created")
-    
-    def set_permissions(self):
-        """Set proper file permissions"""
-        logger.info("Setting file permissions...")
+        with open('/etc/rc.local', 'w') as f:
+            f.write(rc_local_content)
+        subprocess.run(['chmod', '+x', '/etc/rc.local'], check=True)
         
-        # Set ownership
-        subprocess.run(['chown', '-R', f'{self.user}:{self.user}', str(self.base_dir)], check=True)
-        subprocess.run(['chown', '-R', f'{self.user}:{self.user}', str(self.log_dir)], check=True)
-        
-        # Set permissions
-        subprocess.run(['chmod', '-R', '755', str(self.base_dir)], check=True)
-        subprocess.run(['chmod', '-R', '644', str(self.config_dir)], check=True)
-        subprocess.run(['chmod', '-R', '755', str(self.log_dir)], check=True)
-        
-        logger.info("Set file permissions")
+        logger.info("Boot optimization completed")
     
     def run_setup(self):
         """Run complete production setup"""
-        logger.info("Starting SmartRover production setup...")
+        logger.info("Starting SmartRover production setup for autonomous mining...")
         
         self.check_root()
         self.install_system_dependencies()
         self.setup_python_environment()
         self.create_system_user()
         self.create_directories()
+        self.initialize_database()
         self.create_config_files()
-        self.setup_gpio_permissions()
-        self.setup_bluetooth_permissions()
-        self.create_backup_script()
-        self.setup_cron_jobs()
-        self.optimize_system()
-        self.setup_directories()
         self.create_systemd_services()
         self.setup_nginx()
-        self.setup_bluetooth()
-        self.setup_logrotate()
-        self.create_startup_script()
-        self.set_permissions()
+        self.create_management_scripts()
+        self.setup_boot_optimization()
         
         logger.info("Production setup completed successfully!")
-        logger.info("System is ready for deployment.")
+        logger.info("System configured for automatic startup and autonomous mining operations.")
+        logger.info("The vehicle will automatically start mapping and await mining commands on boot.")
+        logger.info(f"Access the dashboard at: http://$(hostname -I | awk '{{print $1}}')")
 
 if __name__ == "__main__":
     setup = ProductionSetup()

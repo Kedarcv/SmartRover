@@ -41,18 +41,26 @@ import {
   XCircle,
 } from "lucide-react"
 
-// Safe fetch utility
+// Safe fetch utility with better error handling
 async function safeFetch<T>(url: string, opts?: RequestInit): Promise<T | null> {
   try {
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 5000) // 5 second timeout
+
     const res = await fetch(url, {
       ...opts,
+      signal: controller.signal,
       cache: "no-store",
       credentials: "include",
     })
+
+    clearTimeout(timeoutId)
+
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const json = (await res.json()) as T
     return (json as any).success === false ? null : (json as T)
-  } catch {
+  } catch (error) {
+    console.warn(`Fetch failed for ${url}:`, error)
     return null
   }
 }
@@ -161,6 +169,7 @@ export default function MiningDashboard() {
   const [showVehicleDialog, setShowVehicleDialog] = useState(false)
   const [newVehicleForm, setNewVehicleForm] = useState({ name: "", url: "" })
   const [isScanning, setIsScanning] = useState(false)
+  const [scanProgress, setScanProgress] = useState(0)
 
   // Vehicle data state
   const [vehicleData, setVehicleData] = useState<VehicleData | null>(null)
@@ -170,6 +179,13 @@ export default function MiningDashboard() {
   const [isLoading, setIsLoading] = useState(false)
   const [logs, setLogs] = useState<string[]>([])
   const [activeTab, setActiveTab] = useState("vehicles")
+
+  // Waypoint management state
+  const [waypoints, setWaypoints] = useState<any[]>([])
+  const [showWaypointDialog, setShowWaypointDialog] = useState(false)
+  const [newWaypoint, setNewWaypoint] = useState({ name: "", x: 0, y: 0, type: "mining", priority: 1 })
+  const [miningSessions, setMiningSessions] = useState<any[]>([])
+  const [mapClickPosition, setMapClickPosition] = useState<{ x: number; y: number } | null>(null)
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
 
@@ -191,10 +207,14 @@ export default function MiningDashboard() {
       const interval = setInterval(() => {
         fetchVehicleData()
         fetchSystemInfo()
+        fetchWaypoints()
         if (activeTab === "logs") {
           fetchLogs()
         }
-      }, 1000)
+        if (activeTab === "mining") {
+          fetchMiningSessions()
+        }
+      }, 2000)
 
       return () => clearInterval(interval)
     }
@@ -268,10 +288,16 @@ export default function MiningDashboard() {
       return
     }
 
+    // Ensure URL has protocol
+    let url = newVehicleForm.url
+    if (!url.startsWith("http://") && !url.startsWith("https://")) {
+      url = "http://" + url
+    }
+
     const newVehicle: Vehicle = {
       id: Date.now().toString(),
       name: newVehicleForm.name,
-      url: newVehicleForm.url,
+      url: url,
       status: "disconnected",
       type: "manual",
     }
@@ -301,12 +327,9 @@ export default function MiningDashboard() {
 
     try {
       // Test connection to vehicle
-      const response = await fetch(`${vehicle.url}/api/system-status`, {
-        method: "GET",
-        timeout: 5000,
-      } as any)
+      const response = await safeFetch<{ success: boolean; data: any }>(`${vehicle.url}/api/system-status`)
 
-      if (response.ok) {
+      if (response?.success) {
         const connectedVehicle = { ...vehicle, status: "connected" as const, lastSeen: Date.now() }
 
         // Update vehicles list
@@ -327,7 +350,7 @@ export default function MiningDashboard() {
       // Update vehicle status to disconnected
       const failedVehicles = vehicles.map((v) => (v.id === vehicle.id ? { ...v, status: "disconnected" as const } : v))
       saveVehicles(failedVehicles)
-      alert(`Failed to connect to ${vehicle.name}`)
+      alert(`Failed to connect to ${vehicle.name}. Make sure the Raspberry Pi is running and accessible.`)
     } finally {
       setIsLoading(false)
     }
@@ -351,47 +374,43 @@ export default function MiningDashboard() {
 
   const scanForVehicles = async () => {
     setIsScanning(true)
+    setScanProgress(0)
     const discoveredVehicles: Vehicle[] = []
 
-    // Common IP ranges and ports for mining vehicles
-    const ipRanges = ["192.168.1.", "192.168.0.", "10.0.0.", "172.16.0."]
+    // Get current network range
+    const currentIP = await getCurrentNetworkIP()
+    const baseIP = currentIP ? currentIP.substring(0, currentIP.lastIndexOf(".")) : "192.168.1"
+
+    // Common ports for mining vehicles
     const ports = [5000, 8080, 3000, 8000]
+    const totalScans = 20 * ports.length // Scan first 20 IPs
+
+    let scanCount = 0
 
     try {
-      for (const range of ipRanges) {
-        for (let i = 1; i <= 254; i++) {
-          for (const port of ports) {
-            const url = `http://${range}${i}:${port}`
+      for (let i = 1; i <= 20; i++) {
+        for (const port of ports) {
+          const url = `http://${baseIP}.${i}:${port}`
+          scanCount++
+          setScanProgress((scanCount / totalScans) * 100)
 
-            try {
-              const controller = new AbortController()
-              const timeoutId = setTimeout(() => controller.abort(), 1000)
+          try {
+            const response = await safeFetch<{ success: boolean; data: any }>(`${url}/api/system-status`)
 
-              const response = await fetch(`${url}/api/system-status`, {
-                method: "GET",
-                signal: controller.signal,
-              })
-
-              clearTimeout(timeoutId)
-
-              if (response.ok) {
-                const data = await response.json()
-                if (data.success) {
-                  const existingVehicle = vehicles.find((v) => v.url === url)
-                  if (!existingVehicle) {
-                    discoveredVehicles.push({
-                      id: `discovered_${Date.now()}_${i}`,
-                      name: `Vehicle ${range}${i}:${port}`,
-                      url,
-                      status: "disconnected",
-                      type: "discovered",
-                    })
-                  }
-                }
+            if (response?.success) {
+              const existingVehicle = vehicles.find((v) => v.url === url)
+              if (!existingVehicle) {
+                discoveredVehicles.push({
+                  id: `discovered_${Date.now()}_${i}_${port}`,
+                  name: `SmartRover ${baseIP}.${i}:${port}`,
+                  url,
+                  status: "disconnected",
+                  type: "discovered",
+                })
               }
-            } catch (error) {
-              // Ignore connection errors during scanning
             }
+          } catch (error) {
+            // Ignore connection errors during scanning
           }
         }
       }
@@ -401,12 +420,24 @@ export default function MiningDashboard() {
         saveVehicles(updatedVehicles)
         alert(`Discovered ${discoveredVehicles.length} new vehicle(s)`)
       } else {
-        alert("No new vehicles discovered")
+        alert("No new vehicles discovered. Make sure your Raspberry Pi is connected and running the SmartRover server.")
       }
     } catch (error) {
       alert("Scan failed")
     } finally {
       setIsScanning(false)
+      setScanProgress(0)
+    }
+  }
+
+  const getCurrentNetworkIP = async (): Promise<string | null> => {
+    try {
+      // Try to get current IP from a simple service
+      const response = await fetch("https://api.ipify.org?format=json")
+      const data = await response.json()
+      return data.ip
+    } catch {
+      return null
     }
   }
 
@@ -471,9 +502,118 @@ export default function MiningDashboard() {
       const result = await response.json()
       if (result.success) {
         console.log(result.message)
+        alert(`Command "${command}" sent successfully`)
       }
     } catch (error) {
       console.error("Failed to send command:", error)
+      alert("Failed to send command. Check connection.")
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  const fetchWaypoints = async () => {
+    if (!activeVehicle) return
+
+    const result = await safeFetch<{ success: boolean; data: any[] }>(`${activeVehicle.url}/api/waypoints`)
+
+    if (result?.success) {
+      setWaypoints(result.data)
+    }
+  }
+
+  const fetchMiningSessions = async () => {
+    if (!activeVehicle) return
+
+    const result = await safeFetch<{ success: boolean; data: any[] }>(`${activeVehicle.url}/api/mining-sessions`)
+
+    if (result?.success) {
+      setMiningSessions(result.data)
+    }
+  }
+
+  const addWaypoint = async () => {
+    if (!activeVehicle || !newWaypoint.name) {
+      alert("Please enter a waypoint name")
+      return
+    }
+
+    try {
+      const response = await fetch(`${activeVehicle.url}/api/waypoints`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(newWaypoint),
+      })
+
+      const result = await response.json()
+      if (result.success) {
+        fetchWaypoints()
+        setNewWaypoint({ name: "", x: 0, y: 0, type: "mining", priority: 1 })
+        setShowWaypointDialog(false)
+        setMapClickPosition(null)
+        alert("Waypoint added successfully")
+      }
+    } catch (error) {
+      alert("Failed to add waypoint")
+    }
+  }
+
+  const deleteWaypoint = async (waypointId: number) => {
+    if (!activeVehicle) return
+
+    try {
+      const response = await fetch(`${activeVehicle.url}/api/waypoints/${waypointId}`, {
+        method: "DELETE",
+      })
+
+      const result = await response.json()
+      if (result.success) {
+        fetchWaypoints()
+        alert("Waypoint deleted successfully")
+      }
+    } catch (error) {
+      alert("Failed to delete waypoint")
+    }
+  }
+
+  const handleMapClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!canvasRef.current) return
+
+    const canvas = canvasRef.current
+    const rect = canvas.getBoundingClientRect()
+    const x = event.clientX - rect.left
+    const y = event.clientY - rect.top
+
+    // Convert canvas coordinates to map coordinates
+    const mapX = (x / canvas.width) * 400 + (vehicleData?.map_data.robot_position[0] || 1000) - 200
+    const mapY = (y / canvas.height) * 300 + (vehicleData?.map_data.robot_position[1] || 1000) - 150
+
+    setMapClickPosition({ x: mapX, y: mapY })
+    setNewWaypoint({ ...newWaypoint, x: mapX, y: mapY })
+    setShowWaypointDialog(true)
+  }
+
+  const sendMiningCommand = async (command: string) => {
+    if (!activeVehicle) return
+
+    setIsLoading(true)
+    try {
+      const response = await fetch(`${activeVehicle.url}/api/vehicle-control`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ command }),
+      })
+
+      const result = await response.json()
+      if (result.success) {
+        alert(`${command.replace("_", " ")} command sent successfully`)
+      }
+    } catch (error) {
+      alert("Failed to send command")
     } finally {
       setIsLoading(false)
     }
@@ -502,7 +642,7 @@ export default function MiningDashboard() {
           imageData.data[pixelIndex + 3] = 255 // A
         } else {
           // Grayscale value
-          const value = typeof mapValue === "number" ? mapValue : 0
+          const value = typeof mapValue === "number" ? value : 0
           imageData.data[pixelIndex] = value
           imageData.data[pixelIndex + 1] = value
           imageData.data[pixelIndex + 2] = value
@@ -643,7 +783,7 @@ export default function MiningDashboard() {
 
         {/* Main Tabs */}
         <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
-          <TabsList className="grid w-full grid-cols-5 bg-gray-800">
+          <TabsList className="grid w-full grid-cols-6 bg-gray-800">
             <TabsTrigger value="vehicles" className="flex items-center gap-2">
               <Settings className="w-4 h-4" />
               Vehicles
@@ -651,6 +791,10 @@ export default function MiningDashboard() {
             <TabsTrigger value="dashboard" className="flex items-center gap-2" disabled={!activeVehicle}>
               <BarChart3 className="w-4 h-4" />
               Dashboard
+            </TabsTrigger>
+            <TabsTrigger value="mining" className="flex items-center gap-2" disabled={!activeVehicle}>
+              <MapPin className="w-4 h-4" />
+              Mining
             </TabsTrigger>
             <TabsTrigger value="control" className="flex items-center gap-2" disabled={!activeVehicle}>
               <Settings className="w-4 h-4" />
@@ -677,7 +821,7 @@ export default function MiningDashboard() {
                   ) : (
                     <Search className="w-4 h-4 mr-2" />
                   )}
-                  {isScanning ? "Scanning..." : "Scan Network"}
+                  {isScanning ? `Scanning... ${scanProgress.toFixed(0)}%` : "Scan Network"}
                 </Button>
                 <Button onClick={() => setShowVehicleDialog(true)}>
                   <Plus className="w-4 h-4 mr-2" />
@@ -685,6 +829,20 @@ export default function MiningDashboard() {
                 </Button>
               </div>
             </div>
+
+            {isScanning && (
+              <Card className="bg-gray-800/50 border-gray-700 backdrop-blur">
+                <CardContent className="pt-6">
+                  <div className="space-y-2">
+                    <div className="flex justify-between text-sm">
+                      <span>Scanning network for vehicles...</span>
+                      <span>{scanProgress.toFixed(0)}%</span>
+                    </div>
+                    <Progress value={scanProgress} className="h-2" />
+                  </div>
+                </CardContent>
+              </Card>
+            )}
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {vehicles.map((vehicle) => (
@@ -750,10 +908,19 @@ export default function MiningDashboard() {
               <Card className="bg-gray-800/50 border-gray-700 backdrop-blur">
                 <CardContent className="text-center py-12">
                   <p className="text-gray-400 mb-4">No vehicles configured</p>
-                  <Button onClick={() => setShowVehicleDialog(true)}>
-                    <Plus className="w-4 h-4 mr-2" />
-                    Add Your First Vehicle
-                  </Button>
+                  <p className="text-sm text-gray-500 mb-4">
+                    Make sure your Raspberry Pi is running the SmartRover server, then scan or add manually.
+                  </p>
+                  <div className="flex gap-2 justify-center">
+                    <Button onClick={scanForVehicles} variant="outline">
+                      <Search className="w-4 h-4 mr-2" />
+                      Scan Network
+                    </Button>
+                    <Button onClick={() => setShowVehicleDialog(true)}>
+                      <Plus className="w-4 h-4 mr-2" />
+                      Add Manually
+                    </Button>
+                  </div>
                 </CardContent>
               </Card>
             )}
@@ -884,6 +1051,188 @@ export default function MiningDashboard() {
                     </CardContent>
                   </Card>
                 </div>
+              </>
+            ) : (
+              <Card className="bg-gray-800/50 border-gray-700 backdrop-blur">
+                <CardContent className="text-center py-12">
+                  <p className="text-gray-400 mb-4">No vehicle connected</p>
+                  <Button onClick={() => setActiveTab("vehicles")}>Connect to a Vehicle</Button>
+                </CardContent>
+              </Card>
+            )}
+          </TabsContent>
+
+          {/* Mining Tab */}
+          <TabsContent value="mining" className="space-y-6">
+            {activeVehicle && isConnected ? (
+              <>
+                {/* Mining Controls */}
+                <Card className="bg-gray-800/50 border-gray-700 backdrop-blur">
+                  <CardHeader>
+                    <CardTitle>Mining Operations</CardTitle>
+                    <CardDescription>Control autonomous mining operations and waypoint navigation</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <div className="flex gap-4">
+                      <Button
+                        onClick={() => sendMiningCommand("start_mining")}
+                        disabled={isLoading || !isConnected}
+                        className="flex items-center gap-2"
+                      >
+                        <Play className="w-4 h-4" />
+                        Start Mining
+                      </Button>
+                      <Button
+                        onClick={() => sendMiningCommand("stop_mining")}
+                        disabled={isLoading || !isConnected}
+                        variant="outline"
+                        className="flex items-center gap-2"
+                      >
+                        <Square className="w-4 h-4" />
+                        Stop Mining
+                      </Button>
+                      <Button
+                        onClick={() => sendMiningCommand("return_to_dock")}
+                        disabled={isLoading || !isConnected}
+                        variant="secondary"
+                        className="flex items-center gap-2"
+                      >
+                        <MapPin className="w-4 h-4" />
+                        Return to Dock
+                      </Button>
+                    </div>
+
+                    {vehicleData?.system_status && (
+                      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mt-4">
+                        <div className="text-center">
+                          <div className="text-2xl font-bold text-blue-400">
+                            {vehicleData.system_status.mining_active ? "ACTIVE" : "INACTIVE"}
+                          </div>
+                          <div className="text-sm text-gray-400">Mining Status</div>
+                        </div>
+                        <div className="text-center">
+                          <div className="text-2xl font-bold text-green-400">
+                            {vehicleData.system_status.waypoints_completed || 0}
+                          </div>
+                          <div className="text-sm text-gray-400">Waypoints Completed</div>
+                        </div>
+                        <div className="text-center">
+                          <div className="text-2xl font-bold text-purple-400">
+                            {vehicleData.system_status.minerals_collected || 0}
+                          </div>
+                          <div className="text-sm text-gray-400">Minerals Collected</div>
+                        </div>
+                        <div className="text-center">
+                          <div className="text-2xl font-bold text-orange-400">
+                            {vehicleData.system_status.total_distance?.toFixed(1) || "0.0"}m
+                          </div>
+                          <div className="text-sm text-gray-400">Total Distance</div>
+                        </div>
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+
+                {/* Interactive Map with Waypoints */}
+                <Card className="bg-gray-800/50 border-gray-700 backdrop-blur">
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      <MapPin className="w-5 h-5" />
+                      Interactive Mining Map
+                    </CardTitle>
+                    <CardDescription>Click on the map to add mining waypoints</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <canvas
+                      ref={canvasRef}
+                      width={400}
+                      height={300}
+                      className="border border-gray-600 rounded w-full bg-black cursor-crosshair"
+                      onClick={handleMapClick}
+                    />
+                    <div className="mt-2 text-sm text-gray-400">
+                      Click anywhere on the map to add a new mining waypoint
+                    </div>
+                  </CardContent>
+                </Card>
+
+                {/* Waypoints List */}
+                <Card className="bg-gray-800/50 border-gray-700 backdrop-blur">
+                  <CardHeader>
+                    <CardTitle>Mining Waypoints</CardTitle>
+                    <CardDescription>Manage mining locations and navigation points</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="space-y-2">
+                      {waypoints.map((waypoint) => (
+                        <div key={waypoint.id} className="flex items-center justify-between p-3 bg-gray-700/50 rounded">
+                          <div>
+                            <div className="font-medium">{waypoint.name}</div>
+                            <div className="text-sm text-gray-400">
+                              Position: ({waypoint.x.toFixed(0)}, {waypoint.y.toFixed(0)}) | Type: {waypoint.type} |
+                              Status: {waypoint.status} | Priority: {waypoint.priority}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <Badge
+                              variant={
+                                waypoint.status === "completed"
+                                  ? "default"
+                                  : waypoint.status === "pending"
+                                    ? "secondary"
+                                    : "outline"
+                              }
+                            >
+                              {waypoint.status}
+                            </Badge>
+                            {waypoint.id !== 1 && (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => deleteWaypoint(waypoint.id)}
+                                className="text-red-400 hover:text-red-300"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </Button>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </CardContent>
+                </Card>
+
+                {/* Mining Sessions History */}
+                <Card className="bg-gray-800/50 border-gray-700 backdrop-blur">
+                  <CardHeader>
+                    <CardTitle>Mining Sessions</CardTitle>
+                    <CardDescription>History of completed mining operations</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="space-y-2">
+                      {miningSessions.slice(0, 5).map((session) => (
+                        <div key={session.id} className="flex items-center justify-between p-3 bg-gray-700/50 rounded">
+                          <div>
+                            <div className="font-medium">Session #{session.id}</div>
+                            <div className="text-sm text-gray-400">
+                              Started: {new Date(session.start_time).toLocaleString()}
+                              {session.end_time && ` | Ended: ${new Date(session.end_time).toLocaleString()}`}
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <div className="text-sm">
+                              Waypoints: {session.waypoints_completed} | Minerals: {session.minerals_collected} |
+                              Distance: {session.total_distance?.toFixed(1) || 0}m
+                            </div>
+                            <Badge variant={session.status === "completed" ? "default" : "secondary"}>
+                              {session.status}
+                            </Badge>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </CardContent>
+                </Card>
               </>
             ) : (
               <Card className="bg-gray-800/50 border-gray-700 backdrop-blur">
@@ -1074,11 +1423,15 @@ export default function MiningDashboard() {
                 </CardHeader>
                 <CardContent>
                   <div className="bg-black rounded-lg p-4 h-96 overflow-y-auto font-mono text-sm">
-                    {logs.map((log, index) => (
-                      <div key={index} className="text-green-400 mb-1">
-                        {log}
-                      </div>
-                    ))}
+                    {logs.length > 0 ? (
+                      logs.map((log, index) => (
+                        <div key={index} className="text-green-400 mb-1">
+                          {log}
+                        </div>
+                      ))
+                    ) : (
+                      <div className="text-gray-400">No logs available</div>
+                    )}
                   </div>
                 </CardContent>
               </Card>
@@ -1117,14 +1470,14 @@ export default function MiningDashboard() {
               </div>
               <div className="space-y-2">
                 <Label htmlFor="vehicle-url" className="text-white">
-                  Server URL
+                  Server URL or IP Address
                 </Label>
                 <Input
                   id="vehicle-url"
                   value={newVehicleForm.url}
                   onChange={(e) => setNewVehicleForm({ ...newVehicleForm, url: e.target.value })}
                   className="bg-gray-700 border-gray-600 text-white"
-                  placeholder="http://192.168.1.100:5000"
+                  placeholder="192.168.1.100:5000 or http://192.168.1.100:5000"
                 />
               </div>
               <div className="flex gap-2">
@@ -1132,6 +1485,80 @@ export default function MiningDashboard() {
                   Add Vehicle
                 </Button>
                 <Button onClick={() => setShowVehicleDialog(false)} variant="outline" className="flex-1">
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          </DialogContent>
+        </Dialog>
+
+        {/* Add Waypoint Dialog */}
+        <Dialog open={showWaypointDialog} onOpenChange={setShowWaypointDialog}>
+          <DialogContent className="sm:max-w-md bg-gray-800 border-gray-700">
+            <DialogHeader>
+              <DialogTitle className="text-white">Add Mining Waypoint</DialogTitle>
+              <DialogDescription className="text-gray-400">
+                Create a new waypoint for autonomous mining operations
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <Label htmlFor="waypoint-name" className="text-white">
+                  Waypoint Name
+                </Label>
+                <Input
+                  id="waypoint-name"
+                  value={newWaypoint.name}
+                  onChange={(e) => setNewWaypoint({ ...newWaypoint, name: e.target.value })}
+                  className="bg-gray-700 border-gray-600 text-white"
+                  placeholder="e.g., Mining Point Alpha"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label htmlFor="waypoint-x" className="text-white">
+                    X Position
+                  </Label>
+                  <Input
+                    id="waypoint-x"
+                    type="number"
+                    value={newWaypoint.x}
+                    onChange={(e) => setNewWaypoint({ ...newWaypoint, x: Number.parseFloat(e.target.value) })}
+                    className="bg-gray-700 border-gray-600 text-white"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="waypoint-y" className="text-white">
+                    Y Position
+                  </Label>
+                  <Input
+                    id="waypoint-y"
+                    type="number"
+                    value={newWaypoint.y}
+                    onChange={(e) => setNewWaypoint({ ...newWaypoint, y: Number.parseFloat(e.target.value) })}
+                    className="bg-gray-700 border-gray-600 text-white"
+                  />
+                </div>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="waypoint-priority" className="text-white">
+                  Priority (1-5)
+                </Label>
+                <Input
+                  id="waypoint-priority"
+                  type="number"
+                  min="1"
+                  max="5"
+                  value={newWaypoint.priority}
+                  onChange={(e) => setNewWaypoint({ ...newWaypoint, priority: Number.parseInt(e.target.value) })}
+                  className="bg-gray-700 border-gray-600 text-white"
+                />
+              </div>
+              <div className="flex gap-2">
+                <Button onClick={addWaypoint} className="flex-1">
+                  Add Waypoint
+                </Button>
+                <Button onClick={() => setShowWaypointDialog(false)} variant="outline" className="flex-1">
                   Cancel
                 </Button>
               </div>
