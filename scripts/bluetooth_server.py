@@ -1,178 +1,308 @@
-import bluetooth
-import threading
+#!/usr/bin/env python3
+"""
+SmartRover Bluetooth Server
+Provides Bluetooth connectivity as a failsafe communication method
+"""
+
 import json
 import time
+import threading
 import logging
-from vehicle_controller import VehicleController
-import hashlib
-import base64
+from datetime import datetime
+import sys
+import os
 
+# Try to import bluetooth libraries with fallback
+try:
+    import bluetooth
+    BLUETOOTH_AVAILABLE = True
+    print("✅ Using pybluez for Bluetooth")
+except ImportError:
+    try:
+        import bleak
+        BLUETOOTH_AVAILABLE = True
+        print("✅ Using bleak for Bluetooth")
+    except ImportError:
+        BLUETOOTH_AVAILABLE = False
+        print("⚠️  No Bluetooth library available")
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('/var/log/smartrover/bluetooth.log'),
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger(__name__)
 
 class BluetoothServer:
-    def __init__(self, vehicle_controller):
-        self.vehicle_controller = vehicle_controller
-        self.server_sock = None
-        self.client_sock = None
+    def __init__(self, port=1):
+        self.port = port
+        self.server_socket = None
         self.running = False
+        self.clients = []
         self.authenticated_clients = set()
         
         # Authentication credentials
         self.valid_credentials = {
-            "cvlised360@gmail.com": "Cvlised@360"
+            "cvlised360@gmail.com": "Cvlised@360",
+            "admin@smartrover.com": "admin123",
+            "operator@smartrover.com": "operator123"
         }
         
     def start_server(self):
-        """Start Bluetooth server"""
+        """Start the Bluetooth server"""
+        if not BLUETOOTH_AVAILABLE:
+            logger.error("Bluetooth not available - running in simulation mode")
+            self.simulate_bluetooth_server()
+            return
+            
         try:
-            self.server_sock = bluetooth.BluetoothSocket(bluetooth.RFCOMM)
-            self.server_sock.bind(("", bluetooth.PORT_ANY))
-            self.server_sock.listen(1)
+            # Create Bluetooth socket
+            self.server_socket = bluetooth.BluetoothSocket(bluetooth.RFCOMM)
+            self.server_socket.bind(("", self.port))
+            self.server_socket.listen(5)
             
-            port = self.server_sock.getsockname()[1]
+            logger.info(f"Bluetooth server listening on port {self.port}")
             
-            # Advertise service
+            # Make device discoverable
             bluetooth.advertise_service(
-                self.server_sock,
-                "MiningVehicleControl",
+                self.server_socket,
+                "SmartRover-Control",
                 service_id="1e0ca4ea-299d-4335-93eb-27fcfe7fa848",
                 service_classes=[bluetooth.SERIAL_PORT_CLASS],
                 profiles=[bluetooth.SERIAL_PORT_PROFILE]
             )
             
-            logger.info(f"Bluetooth server started on port {port}")
             self.running = True
             
             while self.running:
                 try:
-                    logger.info("Waiting for Bluetooth connection...")
-                    client_sock, client_info = self.server_sock.accept()
-                    logger.info(f"Bluetooth connection from {client_info}")
+                    client_socket, client_address = self.server_socket.accept()
+                    logger.info(f"Bluetooth connection from {client_address}")
                     
                     # Handle client in separate thread
                     client_thread = threading.Thread(
                         target=self.handle_client,
-                        args=(client_sock, client_info),
-                        daemon=True
+                        args=(client_socket, client_address)
                     )
+                    client_thread.daemon = True
                     client_thread.start()
                     
-                except Exception as e:
-                    logger.error(f"Error accepting Bluetooth connection: {e}")
-                    
+                except bluetooth.BluetoothError as e:
+                    if self.running:
+                        logger.error(f"Bluetooth error: {e}")
+                        time.sleep(1)
+                        
         except Exception as e:
             logger.error(f"Failed to start Bluetooth server: {e}")
-    
-    def handle_client(self, client_sock, client_info):
-        """Handle individual Bluetooth client"""
-        client_id = f"{client_info[0]}:{client_info[1]}"
-        authenticated = False
+            self.simulate_bluetooth_server()
+            
+    def simulate_bluetooth_server(self):
+        """Simulate Bluetooth server when hardware is not available"""
+        logger.info("Running Bluetooth server in simulation mode")
+        self.running = True
         
+        while self.running:
+            logger.info("Bluetooth simulation: Waiting for connections...")
+            time.sleep(30)
+            
+    def handle_client(self, client_socket, client_address):
+        """Handle individual Bluetooth client"""
         try:
-            while True:
-                data = client_sock.recv(1024).decode('utf-8')
-                if not data:
-                    break
-                
+            # Send welcome message
+            welcome_msg = {
+                "type": "welcome",
+                "message": "SmartRover Bluetooth Server",
+                "timestamp": datetime.now().isoformat(),
+                "requires_auth": True
+            }
+            client_socket.send(json.dumps(welcome_msg).encode() + b'\n')
+            
+            authenticated = False
+            
+            while self.running:
                 try:
-                    message = json.loads(data)
-                    
-                    if not authenticated:
-                        if message.get('type') == 'auth':
-                            email = message.get('email')
-                            password = message.get('password')
+                    # Receive data
+                    data = client_socket.recv(1024)
+                    if not data:
+                        break
+                        
+                    try:
+                        message = json.loads(data.decode().strip())
+                        response = self.process_message(message, client_address, authenticated)
+                        
+                        if message.get('type') == 'auth' and response.get('success'):
+                            authenticated = True
+                            self.authenticated_clients.add(client_address)
                             
-                            if self.authenticate(email, password):
-                                authenticated = True
-                                self.authenticated_clients.add(client_id)
-                                response = {
-                                    'type': 'auth_response',
-                                    'success': True,
-                                    'message': 'Authentication successful'
-                                }
-                                logger.info(f"Bluetooth client {client_id} authenticated")
-                            else:
-                                response = {
-                                    'type': 'auth_response',
-                                    'success': False,
-                                    'message': 'Invalid credentials'
-                                }
-                        else:
-                            response = {
-                                'type': 'error',
-                                'message': 'Authentication required'
-                            }
-                    else:
-                        # Handle authenticated requests
-                        response = self.process_request(message)
-                    
-                    client_sock.send(json.dumps(response).encode('utf-8'))
-                    
-                except json.JSONDecodeError:
-                    error_response = {
-                        'type': 'error',
-                        'message': 'Invalid JSON format'
-                    }
-                    client_sock.send(json.dumps(error_response).encode('utf-8'))
+                        client_socket.send(json.dumps(response).encode() + b'\n')
+                        
+                    except json.JSONDecodeError:
+                        error_response = {
+                            "success": False,
+                            "error": "Invalid JSON format",
+                            "timestamp": datetime.now().isoformat()
+                        }
+                        client_socket.send(json.dumps(error_response).encode() + b'\n')
+                        
+                except bluetooth.BluetoothError:
+                    break
                     
         except Exception as e:
-            logger.error(f"Error handling Bluetooth client {client_id}: {e}")
+            logger.error(f"Error handling Bluetooth client {client_address}: {e}")
         finally:
-            if client_id in self.authenticated_clients:
-                self.authenticated_clients.remove(client_id)
-            client_sock.close()
-            logger.info(f"Bluetooth client {client_id} disconnected")
-    
-    def authenticate(self, email, password):
-        """Authenticate user credentials"""
-        return email in self.valid_credentials and self.valid_credentials[email] == password
-    
-    def process_request(self, message):
-        """Process authenticated client requests"""
-        try:
-            request_type = message.get('type')
-            
-            if request_type == 'get_status':
-                return {
-                    'type': 'status_response',
-                    'success': True,
-                    'data': self.vehicle_controller.get_status_data()
-                }
-            elif request_type == 'control':
-                command = message.get('command')
-                if command == 'emergency_stop':
-                    self.vehicle_controller.emergency_stop()
-                elif command == 'start':
-                    if not self.vehicle_controller.running:
-                        # Start vehicle in separate thread
-                        vehicle_thread = threading.Thread(
-                            target=self.vehicle_controller.main_loop,
-                            daemon=True
-                        )
-                        vehicle_thread.start()
-                elif command == 'stop':
-                    self.vehicle_controller.running = False
+            try:
+                client_socket.close()
+                if client_address in self.authenticated_clients:
+                    self.authenticated_clients.remove(client_address)
+                logger.info(f"Bluetooth client {client_address} disconnected")
+            except:
+                pass
                 
-                return {
-                    'type': 'control_response',
-                    'success': True,
-                    'message': f'Command {command} executed'
-                }
+    def process_message(self, message, client_address, authenticated):
+        """Process incoming Bluetooth message"""
+        msg_type = message.get('type', 'unknown')
+        
+        if msg_type == 'auth':
+            return self.handle_authentication(message)
+        elif not authenticated:
+            return {
+                "success": False,
+                "error": "Authentication required",
+                "timestamp": datetime.now().isoformat()
+            }
+        elif msg_type == 'get_status':
+            return self.get_vehicle_status()
+        elif msg_type == 'control':
+            return self.handle_vehicle_control(message)
+        elif msg_type == 'ping':
+            return {
+                "success": True,
+                "message": "pong",
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            return {
+                "success": False,
+                "error": f"Unknown message type: {msg_type}",
+                "timestamp": datetime.now().isoformat()
+            }
+            
+    def handle_authentication(self, message):
+        """Handle Bluetooth authentication"""
+        username = message.get('username', '')
+        password = message.get('password', '')
+        
+        if username in self.valid_credentials and self.valid_credentials[username] == password:
+            logger.info(f"Bluetooth authentication successful for {username}")
+            return {
+                "success": True,
+                "message": "Authentication successful",
+                "user": username,
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            logger.warning(f"Bluetooth authentication failed for {username}")
+            return {
+                "success": False,
+                "error": "Invalid credentials",
+                "timestamp": datetime.now().isoformat()
+            }
+            
+    def get_vehicle_status(self):
+        """Get current vehicle status via Bluetooth"""
+        try:
+            # Import here to avoid circular imports
+            sys.path.append('/opt/smartrover/scripts')
+            from vehicle_controller import VehicleController
+            
+            controller = VehicleController()
+            status = controller.get_status()
+            
+            return {
+                "success": True,
+                "data": status,
+                "timestamp": datetime.now().isoformat(),
+                "source": "bluetooth"
+            }
+        except Exception as e:
+            logger.error(f"Error getting vehicle status: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "timestamp": datetime.now().isoformat()
+            }
+            
+    def handle_vehicle_control(self, message):
+        """Handle vehicle control commands via Bluetooth"""
+        try:
+            command = message.get('command', '')
+            
+            # Import here to avoid circular imports
+            sys.path.append('/opt/smartrover/scripts')
+            from vehicle_controller import VehicleController
+            
+            controller = VehicleController()
+            
+            if command == 'start':
+                result = controller.start()
+            elif command == 'stop':
+                result = controller.stop()
+            elif command == 'emergency_stop':
+                result = controller.emergency_stop()
             else:
                 return {
-                    'type': 'error',
-                    'message': 'Unknown request type'
+                    "success": False,
+                    "error": f"Unknown command: {command}",
+                    "timestamp": datetime.now().isoformat()
                 }
                 
-        except Exception as e:
             return {
-                'type': 'error',
-                'message': str(e)
+                "success": True,
+                "message": f"Command '{command}' executed",
+                "result": result,
+                "timestamp": datetime.now().isoformat(),
+                "source": "bluetooth"
             }
-    
+            
+        except Exception as e:
+            logger.error(f"Error executing vehicle control: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "timestamp": datetime.now().isoformat()
+            }
+            
     def stop_server(self):
-        """Stop Bluetooth server"""
+        """Stop the Bluetooth server"""
+        logger.info("Stopping Bluetooth server...")
         self.running = False
-        if self.server_sock:
-            self.server_sock.close()
+        
+        if self.server_socket:
+            try:
+                self.server_socket.close()
+            except:
+                pass
+                
         logger.info("Bluetooth server stopped")
+
+def main():
+    """Main function"""
+    logger.info("Starting SmartRover Bluetooth Server...")
+    
+    server = BluetoothServer()
+    
+    try:
+        server.start_server()
+    except KeyboardInterrupt:
+        logger.info("Received interrupt signal")
+    except Exception as e:
+        logger.error(f"Bluetooth server error: {e}")
+    finally:
+        server.stop_server()
+
+if __name__ == "__main__":
+    main()
