@@ -1,104 +1,204 @@
+#!/usr/bin/env python3
 """
-GPIO Pin Mapping for Mining Vehicle
-This file documents all GPIO pin assignments for easy reference
-"""
-
-# L298N Motor Driver Connections
-MOTOR_PINS = {
-    # Motor A (Front Left)
-    'MOTOR_A_IN1': 18,    # Direction control 1
-    'MOTOR_A_IN2': 19,    # Direction control 2
-    'MOTOR_A_ENA': 12,    # Speed control (PWM)
-    
-    # Motor B (Front Right)
-    'MOTOR_B_IN3': 20,    # Direction control 1
-    'MOTOR_B_IN4': 21,    # Direction control 2
-    'MOTOR_B_ENB': 13,    # Speed control (PWM)
-    
-    # Motor C (Rear Left)
-    'MOTOR_C_IN1': 22,    # Direction control 1
-    'MOTOR_C_IN2': 23,    # Direction control 2
-    'MOTOR_C_ENA': 16,    # Speed control (PWM)
-    
-    # Motor D (Rear Right)
-    'MOTOR_D_IN3': 24,    # Direction control 1
-    'MOTOR_D_IN4': 25,    # Direction control 2
-    'MOTOR_D_ENB': 26,    # Speed control (PWM)
-}
-
-# Ultrasonic Sensor Connections (HC-SR04)
-ULTRASONIC_PINS = {
-    'front': {'trigger': 23, 'echo': 24},
-    'left': {'trigger': 25, 'echo': 8},
-    'right': {'trigger': 7, 'echo': 1},
-    'rear': {'trigger': 12, 'echo': 16}
-}
-
-# Status LEDs and Controls
-STATUS_PINS = {
-    'STATUS_LED': 26,      # Green LED - System running
-    'WARNING_LED': 13,     # Red LED - Obstacle detected
-    'EMERGENCY_BUTTON': 6  # Emergency stop button
-}
-
-# Power Supply Requirements
-POWER_REQUIREMENTS = {
-    'raspberry_pi': '5V 3A',
-    'motors': '12V 2A per motor (8A total)',
-    'sensors': '5V 0.5A total',
-    'recommended_battery': '12V 10Ah LiPo or Lead Acid'
-}
-
-# Wiring Instructions
-WIRING_INSTRUCTIONS = """
-L298N Motor Driver Wiring:
-- Connect VCC to 12V battery positive
-- Connect GND to battery negative and Pi GND
-- Connect 5V to Pi 5V (if using L298N 5V regulator)
-- Connect IN1, IN2, ENA to Pi GPIO pins as specified above
-- Connect OUT1, OUT2 to Motor A
-- Repeat for all 4 motors
-
-Ultrasonic Sensor Wiring (HC-SR04):
-- VCC to Pi 5V
-- GND to Pi GND  
-- Trigger to specified GPIO pin
-- Echo to specified GPIO pin (through voltage divider if needed)
-
-LED Wiring:
-- Anode to GPIO pin through 220Ω resistor
-- Cathode to GND
-
-Emergency Button:
-- One terminal to GPIO pin
-- Other terminal to GND
-- Enable internal pull-up resistor in code
+GPIO Pin Mapping Configuration for SmartRover Mining Vehicle
+This module defines the hardware pin configuration for the Raspberry Pi
 """
 
-def print_pin_mapping():
-    """Print complete pin mapping for reference"""
-    print("Mining Vehicle GPIO Pin Mapping")
-    print("=" * 50)
+import logging
+
+logger = logging.getLogger(__name__)
+
+class GPIOPinMapping:
+    """GPIO pin mapping configuration for SmartRover hardware"""
     
-    print("\nMotor Driver Pins:")
-    for motor, pin in MOTOR_PINS.items():
-        print(f"  {motor}: GPIO {pin}")
+    def __init__(self):
+        # Motor controller pins (L298N)
+        self.MOTOR_PINS = {
+            'IN1': 18,  # Motor 1 Direction Pin 1
+            'IN2': 16,  # Motor 1 Direction Pin 2
+            'IN3': 21,  # Motor 2 Direction Pin 1
+            'IN4': 23,  # Motor 2 Direction Pin 2
+            'ENA': 12,  # Motor 1 Enable (PWM)
+            'ENB': 13   # Motor 2 Enable (PWM)
+        }
+        
+        # Ultrasonic sensor pins (HC-SR04)
+        self.SENSOR_PINS = {
+            'TRIG': 24,  # Ultrasonic Trigger Pin
+            'ECHO': 25   # Ultrasonic Echo Pin
+        }
+        
+        # Status LED pins
+        self.LED_PINS = {
+            'STATUS': 26,   # Green status LED
+            'WARNING': 13,  # Red warning LED
+            'MINING': 19    # Blue mining operation LED
+        }
+        
+        # Button pins
+        self.BUTTON_PINS = {
+            'EMERGENCY': 6,  # Emergency stop button
+            'START': 5,      # Start operation button
+            'STOP': 22       # Stop operation button
+        }
+        
+        # Camera module
+        self.CAMERA_CONFIG = {
+            'DEVICE': '/dev/video0',
+            'WIDTH': 640,
+            'HEIGHT': 480,
+            'FPS': 30
+        }
+        
+        # I2C devices (if used)
+        self.I2C_DEVICES = {
+            'IMU': 0x68,        # MPU6050 IMU
+            'COMPASS': 0x1E,    # HMC5883L Compass
+            'DISPLAY': 0x3C     # OLED Display
+        }
+        
+        # SPI devices (if used)
+        self.SPI_DEVICES = {
+            'GPS': 0,           # GPS module on SPI0
+            'RADIO': 1          # Radio module on SPI1
+        }
+        
+        # PWM configuration
+        self.PWM_CONFIG = {
+            'FREQUENCY': 1000,  # 1kHz PWM frequency
+            'DUTY_CYCLE_MIN': 0,
+            'DUTY_CYCLE_MAX': 100
+        }
+        
+        # Safety limits
+        self.SAFETY_LIMITS = {
+            'MAX_SPEED': 0.8,           # Maximum motor speed (0-1)
+            'OBSTACLE_THRESHOLD': 30,    # Minimum distance in cm
+            'EMERGENCY_STOP_TIME': 0.1,  # Emergency stop response time
+            'SENSOR_TIMEOUT': 1.0        # Sensor read timeout
+        }
+        
+        logger.info("GPIO pin mapping initialized")
+        self.log_pin_configuration()
     
-    print("\nUltrasonic Sensor Pins:")
-    for sensor, pins in ULTRASONIC_PINS.items():
-        print(f"  {sensor.upper()}:")
-        print(f"    Trigger: GPIO {pins['trigger']}")
-        print(f"    Echo: GPIO {pins['echo']}")
+    def log_pin_configuration(self):
+        """Log the current pin configuration"""
+        logger.info("=== SmartRover GPIO Pin Configuration ===")
+        logger.info(f"Motor Pins: {self.MOTOR_PINS}")
+        logger.info(f"Sensor Pins: {self.SENSOR_PINS}")
+        logger.info(f"LED Pins: {self.LED_PINS}")
+        logger.info(f"Button Pins: {self.BUTTON_PINS}")
+        logger.info("==========================================")
     
-    print("\nStatus & Control Pins:")
-    for component, pin in STATUS_PINS.items():
-        print(f"  {component}: GPIO {pin}")
+    def validate_pins(self):
+        """Validate pin configuration for conflicts"""
+        all_pins = []
+        
+        # Collect all pins
+        all_pins.extend(self.MOTOR_PINS.values())
+        all_pins.extend(self.SENSOR_PINS.values())
+        all_pins.extend(self.LED_PINS.values())
+        all_pins.extend(self.BUTTON_PINS.values())
+        
+        # Check for duplicates
+        if len(all_pins) != len(set(all_pins)):
+            duplicates = [pin for pin in set(all_pins) if all_pins.count(pin) > 1]
+            logger.error(f"Pin conflict detected! Duplicate pins: {duplicates}")
+            return False
+        
+        # Check for reserved pins
+        reserved_pins = [2, 3, 4, 14, 15, 17, 27]  # I2C, UART, etc.
+        conflicts = [pin for pin in all_pins if pin in reserved_pins]
+        
+        if conflicts:
+            logger.warning(f"Using reserved pins (may cause issues): {conflicts}")
+        
+        logger.info("Pin configuration validation passed")
+        return True
     
-    print("\nPower Requirements:")
-    for component, requirement in POWER_REQUIREMENTS.items():
-        print(f"  {component}: {requirement}")
+    def get_motor_config(self):
+        """Get motor configuration"""
+        return {
+            'pins': self.MOTOR_PINS,
+            'pwm_frequency': self.PWM_CONFIG['FREQUENCY'],
+            'max_speed': self.SAFETY_LIMITS['MAX_SPEED']
+        }
     
-    print(f"\nWiring Instructions:\n{WIRING_INSTRUCTIONS}")
+    def get_sensor_config(self):
+        """Get sensor configuration"""
+        return {
+            'pins': self.SENSOR_PINS,
+            'obstacle_threshold': self.SAFETY_LIMITS['OBSTACLE_THRESHOLD'],
+            'timeout': self.SAFETY_LIMITS['SENSOR_TIMEOUT']
+        }
+    
+    def get_led_config(self):
+        """Get LED configuration"""
+        return self.LED_PINS
+    
+    def get_button_config(self):
+        """Get button configuration"""
+        return self.BUTTON_PINS
+    
+    def export_config(self, filename='gpio_config.json'):
+        """Export configuration to JSON file"""
+        import json
+        
+        config = {
+            'motor_pins': self.MOTOR_PINS,
+            'sensor_pins': self.SENSOR_PINS,
+            'led_pins': self.LED_PINS,
+            'button_pins': self.BUTTON_PINS,
+            'camera_config': self.CAMERA_CONFIG,
+            'i2c_devices': self.I2C_DEVICES,
+            'spi_devices': self.SPI_DEVICES,
+            'pwm_config': self.PWM_CONFIG,
+            'safety_limits': self.SAFETY_LIMITS
+        }
+        
+        with open(filename, 'w') as f:
+            json.dump(config, f, indent=2)
+        
+        logger.info(f"GPIO configuration exported to {filename}")
+
+# Create global instance
+gpio_config = GPIOPinMapping()
+
+# Validate configuration on import
+if not gpio_config.validate_pins():
+    logger.error("GPIO pin configuration validation failed!")
+else:
+    logger.info("GPIO pin configuration loaded successfully")
+
+# Export functions for easy access
+def get_motor_pins():
+    return gpio_config.MOTOR_PINS
+
+def get_sensor_pins():
+    return gpio_config.SENSOR_PINS
+
+def get_led_pins():
+    return gpio_config.LED_PINS
+
+def get_button_pins():
+    return gpio_config.BUTTON_PINS
+
+def get_safety_limits():
+    return gpio_config.SAFETY_LIMITS
 
 if __name__ == "__main__":
-    print_pin_mapping()
+    # Test the configuration
+    print("SmartRover GPIO Pin Configuration Test")
+    print("=====================================")
+    
+    config = GPIOPinMapping()
+    config.validate_pins()
+    config.export_config('test_gpio_config.json')
+    
+    print("\nMotor Configuration:")
+    print(config.get_motor_config())
+    
+    print("\nSensor Configuration:")
+    print(config.get_sensor_config())
+    
+    print("\nConfiguration test completed successfully!")
