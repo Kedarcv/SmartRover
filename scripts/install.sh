@@ -189,22 +189,22 @@ install_python_deps() {
     # Upgrade pip
     pip install --upgrade pip setuptools wheel
     
-    # Install core dependencies
-    pip install numpy==1.21.6
+# Install core dependencies
+    pip install numpy
     pip install opencv-python==4.5.5.64
-    pip install tensorflow==2.8.0
-    pip install flask==2.2.2
-    pip install flask-cors==3.0.10
-    pip install gpiozero==1.6.2
-    pip install RPi.GPIO==0.7.1
-    pip install psutil==5.9.0
-    pip install requests==2.28.1
-    pip install sqlite3  # Usually built-in
+    pip install tensorflow
+    pip install flask
+    pip install flask-cors
+    pip install gpiozero
+    pip install RPi.GPIO
+    pip install psutil
+    pip install requests
+  
     
     # Optional dependencies
-    pip install matplotlib==3.5.3
-    pip install scikit-learn==1.1.3
-    pip install pandas==1.4.4
+    pip install matplotlib
+    pip install scikit-learn
+    pip install pandas
     
     # Set ownership
     chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR/venv"
