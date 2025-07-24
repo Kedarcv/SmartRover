@@ -80,40 +80,11 @@ install_dependencies() {
         "python3-venv"
         "python3-dev"
         "build-essential"
-        "cmake"
-        "pkg-config"
-        "libjpeg-dev"
-        "libtiff5-dev"
-        "libpng-dev"
-        "libavcodec-dev"
-        "libavformat-dev"
-        "libswscale-dev"
-        "libv4l-dev"
-        "libxvidcore-dev"
-        "libx264-dev"
-        "libfontconfig1-dev"
-        "libcairo2-dev"
-        "libgdk-pixbuf2.0-dev"
-        "libpango1.0-dev"
-        "libgtk2.0-dev"
-        "libgtk-3-dev"
-        "libatlas-base-dev"
-        "gfortran"
-        "libhdf5-dev"
-        "libhdf5-serial-dev"
-        "libhdf5-103"
-        "libqt5gui5"
-        "libqt5webkit5"
-        "libqt5test5"
-        "python3-pyqt5"
         "sqlite3"
-        "nginx"
-        "supervisor"
-        "logrotate"
-        "git"
         "curl"
         "wget"
-        "unzip"
+        "git"
+        "nginx"
     )
     
     # Raspberry Pi specific packages
@@ -189,9 +160,9 @@ install_python_deps() {
     # Upgrade pip
     pip install --upgrade pip setuptools wheel
     
-# Install core dependencies
+    # Install core dependencies
     pip install numpy
-    pip install opencv-python==4.5.5.64
+    pip install opencv-python
     pip install tensorflow
     pip install flask
     pip install flask-cors
@@ -199,12 +170,9 @@ install_python_deps() {
     pip install RPi.GPIO
     pip install psutil
     pip install requests
-  
-    
-    # Optional dependencies
-    pip install matplotlib
-    pip install scikit-learn
-    pip install pandas
+    pip install Pillow
+    pip install scipy
+    pip install bleak
     
     # Set ownership
     chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR/venv"
@@ -324,7 +292,7 @@ create_systemd_services() {
     print_status "Creating systemd services..."
     
     # Main server service
-    cat > /etc/systemd/system/smartrover-server.service << EOF
+    cat > /etc/systemd/system/smartrover.service << EOF
 [Unit]
 Description=SmartRover Mining Vehicle Server
 Documentation=https://github.com/smartrover/mining-vehicle
@@ -338,13 +306,12 @@ Group=$SERVICE_USER
 WorkingDirectory=$INSTALL_DIR
 Environment=PATH=$INSTALL_DIR/venv/bin
 Environment=PYTHONPATH=$INSTALL_DIR
-ExecStart=$INSTALL_DIR/venv/bin/python $INSTALL_DIR/enhanced_server.py
-ExecReload=/bin/kill -HUP \$MAINPID
+ExecStart=$INSTALL_DIR/venv/bin/python $INSTALL_DIR/scripts/standalone_vehicle_server.py
 Restart=always
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=smartrover-server
+SyslogIdentifier=smartrover
 
 # Security settings
 NoNewPrivileges=true
@@ -352,58 +319,6 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=$DATA_DIR $LOG_DIR /var/run/smartrover
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    # Vehicle controller service
-    cat > /etc/systemd/system/smartrover-vehicle.service << EOF
-[Unit]
-Description=SmartRover Vehicle Controller
-Documentation=https://github.com/smartrover/mining-vehicle
-After=network.target smartrover-server.service
-Wants=network.target
-Requires=smartrover-server.service
-
-[Service]
-Type=simple
-User=$SERVICE_USER
-Group=$SERVICE_USER
-WorkingDirectory=$INSTALL_DIR
-Environment=PATH=$INSTALL_DIR/venv/bin
-Environment=PYTHONPATH=$INSTALL_DIR
-ExecStart=$INSTALL_DIR/venv/bin/python $INSTALL_DIR/vehicle_controller.py
-Restart=always
-RestartSec=15
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=smartrover-vehicle
-
-# Security settings
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=$DATA_DIR $LOG_DIR /var/run/smartrover
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    # Auto-start service (starts mining on boot)
-    cat > /etc/systemd/system/smartrover-autostart.service << EOF
-[Unit]
-Description=SmartRover Auto-Start Service
-After=smartrover-server.service smartrover-vehicle.service
-Requires=smartrover-server.service smartrover-vehicle.service
-
-[Service]
-Type=oneshot
-User=$SERVICE_USER
-Group=$SERVICE_USER
-ExecStart=/bin/bash -c 'sleep 30 && curl -X POST http://localhost:5000/api/vehicle-control -H "Content-Type: application/json" -d "{\"command\":\"start\"}"'
-RemainAfterExit=true
 
 [Install]
 WantedBy=multi-user.target
@@ -411,9 +326,7 @@ EOF
 
     # Reload systemd and enable services
     systemctl daemon-reload
-    systemctl enable smartrover-server.service
-    systemctl enable smartrover-vehicle.service
-    systemctl enable smartrover-autostart.service
+    systemctl enable smartrover.service
     
     print_success "Systemd services created and enabled"
 }
@@ -506,7 +419,7 @@ $LOG_DIR/*.log {
     notifempty
     create 644 $SERVICE_USER $SERVICE_USER
     postrotate
-        systemctl reload smartrover-server || true
+        systemctl reload smartrover || true
     endscript
 }
 EOF
@@ -521,138 +434,46 @@ create_management_scripts() {
     # Status script
     cat > /usr/local/bin/smartrover-status << 'EOF'
 #!/bin/bash
-echo "SmartRover Mining Vehicle Status"
-echo "================================"
+echo "SmartRover Status"
+echo "================="
+systemctl status smartrover --no-pager
 echo
-echo "Services:"
-systemctl is-active smartrover-server && echo "✓ Server: Running" || echo "✗ Server: Stopped"
-systemctl is-active smartrover-vehicle && echo "✓ Vehicle: Running" || echo "✗ Vehicle: Stopped"
-systemctl is-active nginx && echo "✓ Nginx: Running" || echo "✗ Nginx: Stopped"
-echo
-echo "System Info:"
-echo "IP Address: $(hostname -I | awk '{print $1}')"
-echo "Uptime: $(uptime -p)"
-echo "Temperature: $(vcgencmd measure_temp 2>/dev/null || echo "N/A")"
-echo
-echo "Disk Usage:"
-df -h / | tail -1 | awk '{print "Root: " $3 "/" $2 " (" $5 " used)"}'
-echo
-echo "Memory Usage:"
-free -h | grep Mem | awk '{print "Memory: " $3 "/" $2 " (" int($3/$2*100) "% used)"}'
+echo "Dashboard: http://$(hostname -I | awk '{print $1}'):5000"
 EOF
 
     # Start script
     cat > /usr/local/bin/smartrover-start << 'EOF'
 #!/bin/bash
-echo "Starting SmartRover Mining Vehicle System..."
-systemctl start smartrover-server
-systemctl start smartrover-vehicle
-systemctl start nginx
-sleep 5
-/usr/local/bin/smartrover-status
+echo "Starting SmartRover..."
+sudo systemctl start smartrover
 EOF
 
     # Stop script
     cat > /usr/local/bin/smartrover-stop << 'EOF'
 #!/bin/bash
-echo "Stopping SmartRover Mining Vehicle System..."
-systemctl stop smartrover-vehicle
-systemctl stop smartrover-server
-echo "System stopped."
+echo "Stopping SmartRover..."
+sudo systemctl stop smartrover
 EOF
 
-    # Restart script
-    cat > /usr/local/bin/smartrover-restart << 'EOF'
-#!/bin/bash
-echo "Restarting SmartRover Mining Vehicle System..."
-/usr/local/bin/smartrover-stop
-sleep 3
-/usr/local/bin/smartrover-start
-EOF
-
-    # Backup script
-    cat > /usr/local/bin/smartrover-backup << EOF
-#!/bin/bash
-BACKUP_DIR="$DATA_DIR/backups"
-DATE=\$(date +%Y%m%d_%H%M%S)
-BACKUP_FILE="smartrover_backup_\$DATE.tar.gz"
-
-echo "Creating backup: \$BACKUP_FILE"
-
-tar -czf "\$BACKUP_DIR/\$BACKUP_FILE" \\
-    $DATA_DIR/mining_data.db \\
-    $DATA_DIR/models/ \\
-    $DATA_DIR/maps/ \\
-    /etc/smartrover/ \\
-    $LOG_DIR/ \\
-    --exclude="*.pyc" \\
-    --exclude="__pycache__" \\
-    2>/dev/null
-
-# Keep only last 10 backups
-cd "\$BACKUP_DIR"
-ls -t smartrover_backup_*.tar.gz | tail -n +11 | xargs -r rm
-
-echo "Backup completed: \$BACKUP_FILE"
-EOF
-
-    # Make scripts executable
     chmod +x /usr/local/bin/smartrover-*
-    
+
     print_success "Management scripts created"
 }
 
-# Setup cron jobs
-setup_cron() {
-    print_status "Setting up cron jobs..."
+# Initialize database
+initialize_database() {
+    print_status "Initializing database..."
     
-    cat > /etc/cron.d/smartrover << 'EOF'
-# SmartRover Maintenance Cron Jobs
-SHELL=/bin/bash
-PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
-
-# Daily backup at 2 AM
-0 2 * * * root /usr/local/bin/smartrover-backup
-
-# Weekly log cleanup at 3 AM on Sunday
-0 3 * * 0 root find /var/log/smartrover -name "*.log.*" -mtime +30 -delete
-
-# Daily health check at 6 AM
-0 6 * * * root /usr/local/bin/smartrover-status > /var/log/smartrover/health_check.log 2>&1
-
-# Restart services daily at 4 AM (optional, uncomment if needed)
-# 0 4 * * * root /usr/local/bin/smartrover-restart
-EOF
-    
-    chmod 644 /etc/cron.d/smartrover
-    
-    print_success "Cron jobs configured"
-}
-
-# Configure firewall
-configure_firewall() {
-    print_status "Configuring firewall..."
-    
-    if command -v ufw >/dev/null 2>&1; then
-        ufw --force enable
-        ufw allow ssh
-        ufw allow 80/tcp
-        ufw allow 5000/tcp
-        print_success "UFW firewall configured"
-    else
-        print_warning "UFW not installed, skipping firewall configuration"
-    fi
+    python3 "$INSTALL_DIR/scripts/production_setup.py" || print_warning "Production setup had some issues"
 }
 
 # Start services
 start_services() {
     print_status "Starting services..."
     
-    systemctl start smartrover-server
+    systemctl start smartrover
     sleep 5
-    systemctl start smartrover-vehicle
-    sleep 5
-    systemctl start smartrover-autostart
+    systemctl status smartrover --no-pager || print_warning "Service may still be starting..."
     
     print_success "Services started"
 }
@@ -662,17 +483,10 @@ verify_installation() {
     print_status "Verifying installation..."
     
     # Check services
-    if systemctl is-active --quiet smartrover-server; then
+    if systemctl is-active --quiet smartrover; then
         print_success "SmartRover server is running"
     else
         print_error "SmartRover server failed to start"
-        return 1
-    fi
-    
-    if systemctl is-active --quiet smartrover-vehicle; then
-        print_success "SmartRover vehicle controller is running"
-    else
-        print_error "SmartRover vehicle controller failed to start"
         return 1
     fi
     
@@ -702,21 +516,18 @@ print_final_info() {
     echo "  • Service User: $SERVICE_USER"
     echo
     echo "Access Information:"
-    echo "  • Dashboard URL: http://$(hostname -I | awk '{print $1}')"
-    echo "  • API Endpoint: http://$(hostname -I | awk '{print $1}'):5000/api"
-    echo "  • Health Check: http://$(hostname -I | awk '{print $1}'):5000/health"
+    IP_ADDRESS=$(hostname -I | awk '{print $1}')
+    echo "  • Dashboard URL: http://$IP_ADDRESS"
+    echo "  • API Endpoint: http://$IP_ADDRESS:5000/api"
+    echo "  • Health Check: http://$IP_ADDRESS:5000/health"
     echo
     echo "Management Commands:"
     echo "  • Status: smartrover-status"
     echo "  • Start: smartrover-start"
     echo "  • Stop: smartrover-stop"
-    echo "  • Restart: smartrover-restart"
-    echo "  • Backup: smartrover-backup"
     echo
     echo "Service Management:"
-    echo "  • View logs: journalctl -u smartrover-server -f"
-    echo "  • View vehicle logs: journalctl -u smartrover-vehicle -f"
-    echo "  • Service status: systemctl status smartrover-server"
+    echo "  • View logs: journalctl -u smartrover -f"
     echo
     echo "Features:"
     echo "  ✓ Automatic startup on boot"
@@ -729,7 +540,7 @@ print_final_info() {
     echo "  ✓ Automatic backups"
     echo
     echo "Next Steps:"
-    echo "  1. Access the dashboard at http://$(hostname -I | awk '{print $1}')"
+    echo "  1. Access the dashboard at http://$IP_ADDRESS"
     echo "  2. Add mining waypoints on the map"
     echo "  3. Start mining operation from the dashboard"
     echo "  4. Monitor progress and system status"
@@ -759,8 +570,7 @@ main() {
     setup_nginx
     setup_logrotate
     create_management_scripts
-    setup_cron
-    configure_firewall
+    initialize_database
     start_services
     
     if verify_installation; then

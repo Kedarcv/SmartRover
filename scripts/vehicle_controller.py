@@ -15,10 +15,46 @@ import os
 import sqlite3
 import math
 from datetime import datetime
+import random
+from pathlib import Path
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+class MockHardware:
+    """Mock hardware for testing without actual GPIO"""
+    def __init__(self):
+        self.position = [1000, 1000]  # Start at docking station
+        self.heading = 0
+        self.speed = 0
+        self.sensors = {'front': 100, 'left': 100, 'right': 100, 'rear': 100}
+        
+    def read_sensors(self):
+        """Simulate sensor readings"""
+        # Add some random variation
+        for direction in self.sensors:
+            self.sensors[direction] = max(20, min(200, self.sensors[direction] + random.randint(-10, 10)))
+        return [self.sensors['front'], self.sensors['left'], self.sensors['right'], self.sensors['rear']]
+    
+    def move_forward(self, speed=0.5):
+        """Simulate forward movement"""
+        self.speed = speed
+        # Update position based on heading
+        self.position[0] += math.cos(math.radians(self.heading)) * speed * 10
+        self.position[1] += math.sin(math.radians(self.heading)) * speed * 10
+    
+    def turn_left(self, angle=15):
+        """Simulate left turn"""
+        self.heading = (self.heading - angle) % 360
+    
+    def turn_right(self, angle=15):
+        """Simulate right turn"""
+        self.heading = (self.heading + angle) % 360
+    
+    def stop(self):
+        """Stop the vehicle"""
+        self.speed = 0
 
 class MiningVehicleNN:
     def __init__(self, model_path=None):
@@ -456,6 +492,10 @@ class WaypointNavigator:
         except Exception as e:
             logger.error(f"Error loading waypoints: {e}")
     
+    def reload_waypoints(self):
+        """Reload waypoints from database"""
+        self.load_waypoints()
+    
     def get_next_waypoint(self):
         """Get the next waypoint to navigate to"""
         if not self.current_waypoint and self.waypoints_queue:
@@ -557,7 +597,7 @@ class WaypointNavigator:
             return {'x': 1000, 'y': 1000, 'name': 'Docking Station', 'type': 'dock'}
 
 class VehicleController:
-    def __init__(self, database_path, server_port=5000):
+    def __init__(self, database_path='/var/lib/smartrover/mining_data.db', server_port=5000):
         self.database_path = database_path
         self.nn_model = MiningVehicleNN()
         self.motor_controller = L298NMotorController()
@@ -573,6 +613,7 @@ class VehicleController:
         self.current_session_id = None
         self.waypoints_completed = 0
         self.minerals_collected = 0
+        self.total_distance = 0
         
         # Status LEDs
         try:
@@ -584,6 +625,17 @@ class VehicleController:
             logger.warning(f"LED/Button setup failed: {e}")
             self.status_led = None
             self.warning_led = None
+        
+        # Try to import real hardware, fall back to mock
+        try:
+            import RPi.GPIO as GPIO
+            from gpiozero import DistanceSensor, Motor
+            self.use_real_hardware = True
+            logger.info("Real hardware detected")
+        except ImportError:
+            self.use_real_hardware = False
+            logger.info("Using mock hardware for testing")
+            self.hardware = MockHardware()
     
     def initialize_camera(self):
         """Try to initialize camera"""
@@ -714,6 +766,110 @@ class VehicleController:
         if self.warning_led:
             self.warning_led.on()
         self.running = False
+    
+    def navigate_to_waypoint(self, waypoint):
+        """Navigate to a specific waypoint"""
+        target_x, target_y = waypoint['x'], waypoint['y']
+        current_x, current_y = self.hardware.position
+        
+        # Calculate distance and direction
+        dx = target_x - current_x
+        dy = target_y - current_y
+        distance = math.sqrt(dx*dx + dy*dy)
+        target_heading = math.degrees(math.atan2(dy, dx))
+        
+        logger.info(f"Navigating to {waypoint['name']} at ({target_x}, {target_y}), distance: {distance:.1f}")
+        
+        # Simple navigation logic
+        tolerance = 50  # Distance tolerance
+        
+        while distance > tolerance and self.running and self.mining_active:
+            # Read sensors for obstacle avoidance
+            sensors = self.hardware.read_sensors()
+            
+            # Check for obstacles
+            if sensors[0] < 30:  # Front sensor
+                logger.info("Obstacle detected, turning right")
+                self.hardware.turn_right(30)
+                time.sleep(0.5)
+                continue
+            
+            # Adjust heading towards target
+            heading_diff = target_heading - self.hardware.heading
+            if heading_diff > 180:
+                heading_diff -= 360
+            elif heading_diff < -180:
+                heading_diff += 360
+            
+            if abs(heading_diff) > 10:
+                if heading_diff > 0:
+                    self.hardware.turn_left(min(15, abs(heading_diff)))
+                else:
+                    self.hardware.turn_right(min(15, abs(heading_diff)))
+                time.sleep(0.2)
+            else:
+                # Move forward
+                self.hardware.move_forward(0.5)
+                time.sleep(0.5)
+            
+            # Recalculate distance
+            current_x, current_y = self.hardware.position
+            dx = target_x - current_x
+            dy = target_y - current_y
+            distance = math.sqrt(dx*dx + dy*dy)
+            
+            # Update total distance
+            self.total_distance += 5  # Approximate distance per step
+        
+        if distance <= tolerance:
+            logger.info(f"Reached waypoint: {waypoint['name']}")
+            return True
+        else:
+            logger.info(f"Navigation to {waypoint['name']} interrupted")
+            return False
+    
+    def perform_mining(self, waypoint):
+        """Perform mining operation at waypoint"""
+        logger.info(f"Starting mining at {waypoint['name']}")
+        
+        # Simulate mining operation
+        mining_time = 3  # seconds
+        for i in range(mining_time):
+            if not self.mining_active:
+                break
+            logger.info(f"Mining... {i+1}/{mining_time}")
+            time.sleep(1)
+        
+        if self.mining_active:
+            # Simulate collecting minerals
+            minerals_found = random.randint(1, 5)
+            self.minerals_collected += minerals_found
+            logger.info(f"Mining complete! Collected {minerals_found} minerals")
+            
+            # Mark waypoint as completed
+            self.mark_waypoint_completed(waypoint['id'])
+            self.waypoints_completed += 1
+            return True
+        else:
+            logger.info("Mining interrupted")
+            return False
+    
+    def mark_waypoint_completed(self, waypoint_id):
+        """Mark waypoint as completed in database"""
+        try:
+            conn = sqlite3.connect(self.database_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                UPDATE waypoints SET status = 'completed', completed_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ''', (waypoint_id,))
+            
+            conn.commit()
+            conn.close()
+            logger.info(f"Waypoint {waypoint_id} marked as completed")
+        except Exception as e:
+            logger.error(f"Error marking waypoint completed: {e}")
     
     def main_loop(self):
         """Main control loop"""
@@ -872,6 +1028,12 @@ class VehicleController:
         logger.info("Vehicle controller cleanup completed")
 
 if __name__ == "__main__":
-    database_path = '/var/lib/smartrover/mining_data.db'
-    controller = VehicleController(database_path)
-    controller.main_loop()
+    controller = VehicleController()
+    controller.running = True
+    
+    try:
+        controller.main_loop()
+    except KeyboardInterrupt:
+        logger.info("Shutting down...")
+        controller.cleanup()
+</merged_code>
